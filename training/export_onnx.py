@@ -120,10 +120,10 @@ def build_geo_lookup_subgraph(
 
     # Constants for lat/lon extraction
     initializers.append(
-        numpy_helper.from_array(np.array([LAT_INDEX], dtype=np.int64), name="lat_idx_const")
+        numpy_helper.from_array(np.array(LAT_INDEX, dtype=np.int64), name="lat_idx_const")
     )
     initializers.append(
-        numpy_helper.from_array(np.array([LON_INDEX], dtype=np.int64), name="lon_idx_const")
+        numpy_helper.from_array(np.array(LON_INDEX, dtype=np.int64), name="lon_idx_const")
     )
 
     nodes.append(helper.make_node("Gather", [input_name, "lat_idx_const"], ["lat_raw"], axis=1))
