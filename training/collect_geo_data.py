@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # Zillow Research data URLs
 ZHVI_URL = (
     "https://files.zillowstatic.com/research/public_csvs/zhvi/"
-    "Zip_zhvi_uf_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
+    "Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
 )
 
 # Census ZCTA gazetteer (ZIP code centroids)
