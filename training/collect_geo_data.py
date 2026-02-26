@@ -53,6 +53,10 @@ ZHVI_URL = (
 # Census ZCTA gazetteer (ZIP code centroids)
 ZCTA_URL = (
     "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+    "2024_Gazetteer/2024_Gaz_zcta_national.zip"
+)
+ZCTA_URL_FALLBACK = (
+    "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
     "2023_Gazetteer/2023_Gaz_zcta_national.txt"
 )
 
@@ -90,21 +94,40 @@ def download_zhvi(output_dir: Path) -> pd.DataFrame:
 
 def download_zcta_centroids(output_dir: Path) -> pd.DataFrame:
     """Download ZIP code centroid coordinates from Census."""
+    import zipfile
+
     cache_path = output_dir / "zcta_centroids.tsv"
 
     if cache_path.exists():
         logger.info(f"Loading cached ZCTA centroids from {cache_path}")
         return pd.read_csv(cache_path, sep="\t", dtype={"GEOID": str})
 
-    logger.info("Downloading ZCTA centroids from Census...")
-    resp = httpx.get(ZCTA_URL, timeout=120, follow_redirects=True)
-    resp.raise_for_status()
-
     output_dir.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(resp.content)
-    logger.info(f"Saved ZCTA centroids to {cache_path}")
 
-    return pd.read_csv(io.BytesIO(resp.content), sep="\t", dtype={"GEOID": str})
+    for url in [ZCTA_URL, ZCTA_URL_FALLBACK]:
+        try:
+            logger.info(f"Downloading ZCTA centroids from {url}...")
+            resp = httpx.get(url, timeout=120, follow_redirects=True)
+            resp.raise_for_status()
+
+            if url.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    txt_names = [n for n in zf.namelist() if n.endswith(".txt")]
+                    if not txt_names:
+                        raise ValueError("No .txt found in ZCTA zip")
+                    with zf.open(txt_names[0]) as f:
+                        content = f.read()
+            else:
+                content = resp.content
+
+            cache_path.write_bytes(content)
+            logger.info(f"Saved ZCTA centroids to {cache_path}")
+            return pd.read_csv(io.BytesIO(content), sep="\t", dtype={"GEOID": str})
+        except Exception as e:
+            logger.warning(f"Failed to download from {url}: {e}")
+            continue
+
+    raise RuntimeError("All ZCTA download URLs failed")
 
 
 def download_redfin_zip_data(output_dir: Path) -> pd.DataFrame:
