@@ -180,12 +180,15 @@ def train_catboost(
     logger.info(f"Training {name} (CatBoost)...")
     fit_params = dict(params)
 
-    model = cb.CatBoostRegressor(random_seed=42, **fit_params)
+    model = cb.CatBoostRegressor(
+        random_seed=42,
+        feature_names=feature_names,
+        **fit_params,
+    )
     model.fit(
         X_train, y_train,
         eval_set=(X_val, y_val),
         early_stopping_rounds=100,
-        feature_names=feature_names,
     )
 
     val_mape = compute_mape(y_val, model.predict(X_val))
