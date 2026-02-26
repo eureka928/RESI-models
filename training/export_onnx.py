@@ -174,8 +174,10 @@ def build_geo_lookup_subgraph(
             output_name = f"{p}_{sname}_val"
             unsqueeze_name = f"{output_name}_unsq"
 
-            initializers.append(numpy_helper.from_array(surface_data.astype(np.float32), name=tensor_name))
-            nodes.append(helper.make_node("Gather", [tensor_name, f"{p}_cell_idx"], [output_name], axis=0))
+            # Store as float16 to halve geo surface memory (~50 MB savings)
+            initializers.append(numpy_helper.from_array(surface_data.astype(np.float16), name=tensor_name))
+            nodes.append(helper.make_node("Gather", [tensor_name, f"{p}_cell_idx"], [f"{output_name}_f16"], axis=0))
+            nodes.append(helper.make_node("Cast", [f"{output_name}_f16"], [output_name], to=TensorProto.FLOAT))
 
             initializers.append(numpy_helper.from_array(np.array([1], dtype=np.int64), name=f"{output_name}_axis"))
             nodes.append(helper.make_node("Unsqueeze", [output_name, f"{output_name}_axis"], [unsqueeze_name]))

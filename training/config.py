@@ -219,13 +219,13 @@ PARAMS_M1 = {
     "objective": "regression_l1",  # MAE on log-space ≈ price-space MAPE
     "metric": "mape",              # early-stop on what validator actually scores
     "boosting_type": "gbdt",
-    "num_leaves": 255,
+    "num_leaves": 127,
     "learning_rate": 0.03,
     "feature_fraction": 0.8,
     "bagging_fraction": 0.8,
     "bagging_freq": 5,
     "min_child_samples": 20,
-    "n_estimators": 5000,
+    "n_estimators": 3000,
     "verbose": -1,
 }
 
@@ -233,13 +233,13 @@ PARAMS_M2 = {
     "objective": "mape",           # diversity: log-space MAPE (cheap-property bias)
     "metric": "mape",
     "boosting_type": "gbdt",
-    "num_leaves": 127,
+    "num_leaves": 63,
     "learning_rate": 0.05,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.7,
     "bagging_freq": 3,
     "min_child_samples": 30,
-    "n_estimators": 4000,
+    "n_estimators": 2500,
     "verbose": -1,
 }
 
@@ -249,12 +249,12 @@ PARAMS_M3 = {
     "objective": "reg:absoluteerror",  # MAE on log-space ≈ price-space MAPE
     "eval_metric": "mape",
     "tree_method": "hist",
-    "max_depth": 8,
+    "max_depth": 6,
     "learning_rate": 0.03,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
     "min_child_weight": 20,
-    "n_estimators": 4000,
+    "n_estimators": 2500,
     "verbosity": 0,
 }
 
@@ -263,9 +263,9 @@ PARAMS_M3 = {
 PARAMS_M4 = {
     "loss_function": "MAPE",       # diversity: log-space MAPE
     "eval_metric": "MAPE",
-    "depth": 8,
+    "depth": 6,
     "learning_rate": 0.03,
-    "iterations": 3000,
+    "iterations": 2000,
     "l2_leaf_reg": 3.0,
     "subsample": 0.8,
     "random_strength": 1.0,
