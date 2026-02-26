@@ -134,6 +134,14 @@ MONTHS_SINCE_LAST_SALE_DEFAULT = 144.0
 MIN_PRICE = 50_000.0
 MAX_PRICE = 20_000_000.0
 
+# --- Non-Disclosure States ---
+# These states have non-disclosure laws for housing sale prices.
+# Validators cannot verify predictions for properties in these states,
+# so they should be excluded from training data.
+NON_DISCLOSURE_STATES = {
+    "AK", "ID", "KS", "LA", "MS", "MO", "MT", "NM", "ND", "TX", "UT", "WY",
+}
+
 # --- Geographic Grid Configuration ---
 
 # Grid covering continental US
@@ -168,20 +176,25 @@ TOTAL_GEO_FEATURES = GEO_FEATURES_PER_GRID * 2  # 34
 # --- Target Markets for Data Collection ---
 
 TARGET_MARKETS = [
-    # Top 50 US metros by population for geographic diversity
-    "New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX",
-    "Phoenix, AZ", "Philadelphia, PA", "San Antonio, TX", "San Diego, CA",
-    "Dallas, TX", "Austin, TX", "Jacksonville, FL", "San Jose, CA",
-    "Fort Worth, TX", "Columbus, OH", "Charlotte, NC", "Indianapolis, IN",
+    # Top US metros excluding non-disclosure states
+    # (AK, ID, KS, LA, MS, MO, MT, NM, ND, TX, UT, WY excluded)
+    "New York, NY", "Los Angeles, CA", "Chicago, IL",
+    "Phoenix, AZ", "Philadelphia, PA", "San Diego, CA",
+    "Jacksonville, FL", "San Jose, CA",
+    "Columbus, OH", "Charlotte, NC", "Indianapolis, IN",
     "San Francisco, CA", "Seattle, WA", "Denver, CO", "Nashville, TN",
-    "Oklahoma City, OK", "Washington, DC", "El Paso, TX", "Las Vegas, NV",
+    "Oklahoma City, OK", "Washington, DC", "Las Vegas, NV",
     "Boston, MA", "Portland, OR", "Memphis, TN", "Louisville, KY",
-    "Baltimore, MD", "Milwaukee, WI", "Albuquerque, NM", "Tucson, AZ",
+    "Baltimore, MD", "Milwaukee, WI", "Tucson, AZ",
     "Fresno, CA", "Mesa, AZ", "Sacramento, CA", "Atlanta, GA",
-    "Kansas City, MO", "Omaha, NE", "Colorado Springs, CO", "Raleigh, NC",
+    "Omaha, NE", "Colorado Springs, CO", "Raleigh, NC",
     "Miami, FL", "Tampa, FL", "Minneapolis, MN", "Cleveland, OH",
     "Detroit, MI", "Pittsburgh, PA", "Cincinnati, OH", "Orlando, FL",
-    "St. Louis, MO", "Richmond, VA",
+    "Richmond, VA",
+    # Replacement markets for removed non-disclosure states
+    "Virginia Beach, VA", "Honolulu, HI", "Newark, NJ",
+    "Bridgeport, CT", "Providence, RI", "Hartford, CT",
+    "Wilmington, DE", "Charleston, SC", "Savannah, GA",
 ]
 
 # --- LightGBM Hyperparameters ---

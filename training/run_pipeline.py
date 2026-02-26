@@ -292,12 +292,12 @@ def step_validate(model_path: Path) -> None:
 
             logger.info("\nTest sample predictions:")
             for i, sample in enumerate(test_data["samples"]):
-                zpid = sample["zpid"]
+                sample_id = sample.get("external_id") or sample.get("zpid", "?")
                 actual = actual_prices[i]
                 pred = preds[i]
                 error = abs(pred - actual) / actual
                 logger.info(
-                    f"  zpid {zpid}: actual=${actual:,.0f}, pred=${pred:,.0f}, "
+                    f"  {sample_id}: actual=${actual:,.0f}, pred=${pred:,.0f}, "
                     f"error={error:.2%}"
                 )
 

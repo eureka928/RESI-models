@@ -27,6 +27,7 @@ from config import (
     HOME_TYPE_CATEGORIES,
     MIN_SCHOOL_DISTANCE_DEFAULT,
     MONTHS_SINCE_LAST_SALE_DEFAULT,
+    NON_DISCLOSURE_STATES,
     SCHOOL_RATING_DEFAULT,
     YEARS_SINCE_LAST_SALE_DEFAULT,
 )
@@ -41,6 +42,28 @@ DEFAULT_OUTPUT = Path(__file__).parent / "dataset.parquet"
 
 # Current year for property_age calculation
 CURRENT_YEAR = datetime.now().year
+
+
+def get_property_state(prop: dict) -> str | None:
+    """Extract 2-letter state abbreviation from a property JSON.
+
+    Handles both detail format (address.state) and search format (addressState, state).
+    """
+    # Unwrap nested data if present
+    inner = prop
+    if "zpid" not in inner and isinstance(inner.get("data"), dict):
+        inner = inner["data"]
+
+    # Try multiple field paths
+    addr = inner.get("address", {}) or {}
+    state = (
+        addr.get("state")
+        or inner.get("addressState")
+        or inner.get("state")
+    )
+    if state and len(str(state).strip()) == 2:
+        return str(state).strip().upper()
+    return None
 
 
 def safe_float(value, default: float = 0.0) -> float:
@@ -755,6 +778,7 @@ def process_raw_data(
     records = []
     errors = 0
     skipped = 0
+    nd_filtered = 0
 
     for json_path in tqdm(json_files, desc="Extracting detail features"):
         try:
@@ -762,6 +786,12 @@ def process_raw_data(
                 raw = json.load(f)
         except (json.JSONDecodeError, OSError):
             errors += 1
+            continue
+
+        # Filter non-disclosure states
+        state = get_property_state(raw)
+        if state and state in NON_DISCLOSURE_STATES:
+            nd_filtered += 1
             continue
 
         features = extract_features(raw)
@@ -779,7 +809,7 @@ def process_raw_data(
     detail_count = len(records)
     logger.info(
         f"Extracted {detail_count} detailed properties "
-        f"(skipped {skipped}, errors {errors})"
+        f"(skipped {skipped}, non-disclosure {nd_filtered}, errors {errors})"
     )
 
     # --- Process search-only properties (search_data/) ---
@@ -792,6 +822,7 @@ def process_raw_data(
 
         search_errors = 0
         search_skipped = 0
+        search_nd_filtered = 0
 
         for json_path in tqdm(search_files, desc="Extracting search features"):
             # Skip if we already have detail data for this zpid
@@ -804,6 +835,12 @@ def process_raw_data(
                     raw = json.load(f)
             except (json.JSONDecodeError, OSError):
                 search_errors += 1
+                continue
+
+            # Filter non-disclosure states
+            state = get_property_state(raw)
+            if state and state in NON_DISCLOSURE_STATES:
+                search_nd_filtered += 1
                 continue
 
             features = extract_features_from_search(raw, school_lookup=school_lookup_fn)
@@ -821,7 +858,7 @@ def process_raw_data(
         search_count = len(records) - detail_count
         logger.info(
             f"Extracted {search_count} search properties "
-            f"(skipped {search_skipped}, errors {search_errors})"
+            f"(skipped {search_skipped}, non-disclosure {search_nd_filtered}, errors {search_errors})"
         )
 
     logger.info(f"Total records: {len(records)}")
