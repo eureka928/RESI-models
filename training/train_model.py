@@ -152,12 +152,15 @@ def train_xgboost(
     fit_params = dict(params)
     n_estimators = fit_params.pop("n_estimators", 4000)
 
-    model = xgb.XGBRegressor(n_estimators=n_estimators, **fit_params)
+    model = xgb.XGBRegressor(
+        n_estimators=n_estimators,
+        early_stopping_rounds=100,
+        **fit_params,
+    )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
         verbose=200,
-        early_stopping_rounds=100,
         feature_names=feature_names,
     )
 
