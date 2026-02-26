@@ -97,12 +97,14 @@ def load_and_prepare_data(
 
     X = X.values.astype(np.float32)
 
-    # Time-based split: use last val_fraction as validation
-    n = len(X)
-    split_idx = int(n * (1 - val_fraction))
+    # Random split (data may be ordered by market/source)
+    rng = np.random.RandomState(42)
+    indices = rng.permutation(len(X))
+    split_idx = int(len(X) * (1 - val_fraction))
 
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
+    train_idx, val_idx = indices[:split_idx], indices[split_idx:]
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = y[train_idx], y[val_idx]
 
     logger.info(f"Train: {len(X_train)} samples, Val: {len(X_val)} samples")
     logger.info(
@@ -155,13 +157,13 @@ def train_xgboost(
     model = xgb.XGBRegressor(
         n_estimators=n_estimators,
         early_stopping_rounds=100,
+        feature_names=feature_names,
         **fit_params,
     )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
         verbose=200,
-        feature_names=feature_names,
     )
 
     val_mape = compute_mape(y_val, model.predict(X_val))
@@ -178,7 +180,7 @@ def train_catboost(
     logger.info(f"Training {name} (CatBoost)...")
     fit_params = dict(params)
 
-    model = cb.CatBoostRegressor(**fit_params)
+    model = cb.CatBoostRegressor(random_seed=42, **fit_params)
     model.fit(
         X_train, y_train,
         eval_set=(X_val, y_val),
