@@ -249,8 +249,9 @@ def build_zip_zhvi_lookup(
     zhvi_subset = zhvi_subset.dropna(subset=["zhvi_raw"])
     zhvi_subset["zip"] = zhvi_subset["zip"].str.zfill(5)
 
-    # Parse ZCTA centroids
-    zcta_subset = zcta_df[["GEOID", "INTPTLAT", "INTPTLONG"]].copy()
+    # Parse ZCTA centroids (column name varies by year: INTPTLONG vs INTPTLON)
+    lon_col = "INTPTLONG" if "INTPTLONG" in zcta_df.columns else "INTPTLON"
+    zcta_subset = zcta_df[["GEOID", "INTPTLAT", lon_col]].copy()
     zcta_subset.columns = ["zip", "lat", "lon"]
     zcta_subset["zip"] = zcta_subset["zip"].str.strip().str.zfill(5)
     zcta_subset["lat"] = pd.to_numeric(zcta_subset["lat"], errors="coerce")
