@@ -55,7 +55,9 @@ def get_property_state(prop: dict) -> str | None:
         inner = inner["data"]
 
     # Try multiple field paths
-    addr = inner.get("address", {}) or {}
+    addr = inner.get("address") or {}
+    if not isinstance(addr, dict):
+        addr = {}
     state = (
         addr.get("state")
         or inner.get("addressState")
