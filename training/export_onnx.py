@@ -25,6 +25,7 @@ import logging
 import pickle
 from pathlib import Path
 
+import lightgbm as lgb
 import numpy as np
 import onnx
 import onnxruntime as ort
@@ -72,6 +73,18 @@ SURFACE_NAMES = (
 
 def convert_lgbm_to_onnx(model, n_features: int, name: str) -> onnx.ModelProto:
     """Convert a LightGBM model to ONNX format."""
+    # onnxmltools doesn't support 'mape' objective — patch to 'regression'
+    # The tree structure is identical; only the loss function differs during training
+    booster = model.booster_
+    model_str = booster.model_to_string()
+    for obj_name in ["mape", "regression_l1"]:
+        model_str = model_str.replace(
+            f"objective={obj_name}", "objective=regression"
+        )
+    patched_booster = lgb.Booster(model_str=model_str)
+    model._Booster = patched_booster
+    model.objective_ = "regression"
+
     initial_type = [("input", FloatTensorType([None, n_features]))]
     return convert_lightgbm(model, initial_types=initial_type, name=name)
 
