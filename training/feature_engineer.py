@@ -261,7 +261,16 @@ def extract_features(prop: dict) -> dict | None:
         prop = prop["data"]
 
     # Get sale price (target variable)
-    price = prop.get("price") or prop.get("zestimate")
+    # Try multiple fields: API returns price=0 for sold properties,
+    # actual sold price is in lastSoldPrice, soldPrice, or priceHistory
+    price = None
+    for price_field in ["lastSoldPrice", "soldPrice", "price"]:
+        val = prop.get(price_field)
+        if val and safe_float(val) > 0:
+            price = val
+            break
+    if price is None:
+        price = prop.get("zestimate")
     if price is None:
         # Try priceHistory for most recent sold price
         ph = prop.get("priceHistory", [])

@@ -6,12 +6,23 @@ All models must accept a (batch, 79) float32 input in this exact order.
 """
 
 import os
+from pathlib import Path
+
+# --- Load .env file if present ---
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _val = _line.split("=", 1)
+                os.environ.setdefault(_key.strip(), _val.strip())
 
 # --- API Configuration ---
 
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = os.environ.get(
-    "RAPIDAPI_HOST", "real-time-zillow-data.p.rapidapi.com"
+    "RAPIDAPI_HOST", "real-time-real-estate-data.p.rapidapi.com"
 )
 
 # --- Feature Order (79 features, matches feature_config.yaml exactly) ---

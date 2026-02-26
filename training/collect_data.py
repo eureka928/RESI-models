@@ -1,26 +1,26 @@
 """
 Fetch recently sold US residential properties from Zillow via RapidAPI.
 
-Uses the "Real-Time Zillow Data" API by OpenWeb Ninja on RapidAPI.
-This is the most popular and actively maintained Zillow API (replaces deprecated zillow-com1).
+Uses the "Real-Time Real Estate Data" API by OpenWeb Ninja on RapidAPI.
+Host: real-time-real-estate-data.p.rapidapi.com
 
 Two endpoints are used:
-  1. GET /propertyExtendedSearch  — search recently sold properties by location
-     Params: location, status_type=RecentlySold, home_type, page
-     Returns: list of property summaries with zpid
-  2. GET /property                — full property details by zpid
+  1. GET /search — search recently sold properties by location
+     Params: location, home_status=RECENTLY_SOLD
+     Returns: {"data": [{"zpid", "homeType", "bedrooms", "bathrooms", "latitude", ...}]}
+  2. GET /property-details — full property details by zpid
      Params: zpid
-     Returns: 259+ fields including resoFacts, nearbySchools, priceHistory
+     Returns: {"data": {...}} with resoFacts(187 fields), schools, priceHistory, homeType
 
 Setup:
-  1. Go to https://rapidapi.com/letscrape-6bRBa3QguO5/api/real-time-zillow-data
+  1. Go to https://rapidapi.com/letscrape-6bRBa3QguO5/api/real-time-real-estate-data
   2. Subscribe (Free=100 req/mo, Pro=$25/10K, Ultra=$75/50K, Mega=$150/200K)
   3. Copy your API key from the RapidAPI dashboard
-  4. export RAPIDAPI_KEY=your_key_here
+  4. Set in training/.env: RAPIDAPI_KEY=your_key_here
 
 Usage:
     python collect_data.py --rapidapi-key YOUR_KEY --num-properties 50000
-    python collect_data.py  # uses RAPIDAPI_KEY env var
+    python collect_data.py  # uses RAPIDAPI_KEY from .env
 
 Saves raw JSON responses to training/raw_data/{zpid}.json for reprocessing.
 Supports resume — already-fetched zpids are skipped.
@@ -66,16 +66,17 @@ async def search_sold_properties(
     """
     Search for recently sold properties in a location.
 
-    Uses GET /propertyExtendedSearch with status_type=RecentlySold.
+    Uses GET /search with home_status=RECENTLY_SOLD.
     Returns list of property summary dicts containing zpid.
     """
     host = headers["x-rapidapi-host"]
-    url = f"https://{host}/propertyExtendedSearch"
+    url = f"https://{host}/search"
     params = {
         "location": location,
-        "status_type": "RecentlySold",
-        "page": str(page),
+        "home_status": "RECENTLY_SOLD",
     }
+    if page > 1:
+        params["page"] = str(page)
 
     try:
         resp = await client.get(url, headers=headers, params=params, timeout=30)
@@ -83,25 +84,12 @@ async def search_sold_properties(
         data = resp.json()
         await asyncio.sleep(delay)
 
-        # The zillow-com1 API returns {"props": [...]} for search results
         results = []
         if isinstance(data, dict):
-            # Primary response format: data["props"]
-            props = data.get("props", [])
-            if isinstance(props, list) and props:
-                results = props
-            # Fallback: some versions use data["results"]
-            elif "results" in data:
-                fallback = data["results"]
-                if isinstance(fallback, list):
-                    results = fallback
-            # Fallback: searchResults.listResults
-            elif "searchResults" in data:
-                sr = data.get("searchResults", {})
-                if isinstance(sr, dict):
-                    list_results = sr.get("listResults", [])
-                    if list_results:
-                        results = list_results
+            # Primary format: {"data": [...]}
+            results = data.get("data", [])
+            if not isinstance(results, list):
+                results = []
 
         logger.debug(f"  Search returned {len(results)} results")
         return results
@@ -129,13 +117,13 @@ async def fetch_property_detail(
     """
     Fetch full property details for a zpid.
 
-    Uses GET /property with zpid parameter.
-    Returns the full property detail JSON (259+ fields) including
-    resoFacts, nearbySchools, priceHistory, homeType, etc.
+    Uses GET /property-details with zpid parameter.
+    Returns the property detail dict with resoFacts(187 fields),
+    schools, priceHistory, homeType, etc.
     """
     async with semaphore:
         host = headers["x-rapidapi-host"]
-        url = f"https://{host}/property"
+        url = f"https://{host}/property-details"
         params = {"zpid": zpid}
 
         try:
@@ -143,9 +131,12 @@ async def fetch_property_detail(
                 url, headers=headers, params=params, timeout=30
             )
             resp.raise_for_status()
-            data = resp.json()
+            raw = resp.json()
             await asyncio.sleep(delay)
-            return data
+            # API wraps detail in {"data": {...}}
+            if isinstance(raw, dict) and "data" in raw:
+                return raw["data"]
+            return raw
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 logger.warning(f"Rate limited on zpid {zpid}, waiting 30s...")
