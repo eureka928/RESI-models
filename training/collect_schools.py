@@ -30,29 +30,25 @@ logger = logging.getLogger(__name__)
 
 SCHOOL_DATA_DIR = Path(__file__).parent / "school_data"
 
-# NCES Public School Universe Survey data
-# Using the most recent available year
-NCES_URL = "https://nces.ed.gov/ccd/Data/zip/ccd_sch_029_2223_w_1a_080923.zip"
+# NCES EDGE Geocode data (school locations with lat/lon)
+NCES_URLS = [
+    "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_PUBLICSCH_2425.zip",
+    "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_PUBLICSCH_2324.zip",
+    "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_PUBLICSCH_2223.zip",
+]
 
-# Relevant NCES columns
+# Relevant NCES columns (EDGE geocode format)
 NCES_COLUMNS = {
     "NCESSCH": "nces_id",  # unique school ID
-    "SCH_NAME": "name",  # school name
-    "LSTATE": "state",  # state abbreviation
+    "NAME": "name",  # school name
+    "STATE": "state",  # state abbreviation
     "LAT": "lat",  # latitude
     "LON": "lon",  # longitude
-    "LEVEL": "level",  # school level code
-    "SY_STATUS": "status",  # operational status (1=open)
     "LOCALE": "locale",  # locale code (urban/suburban/rural)
 }
 
-# School level codes from NCES
-LEVEL_MAP = {
-    "1": "elementary",  # Primary (low grade = PK through 03; high grade = PK through 08)
-    "2": "middle",  # Middle (low grade = 04 through 07; high grade = 04 through 09)
-    "3": "high",  # High (low grade = 07 through 12; high grade = 12 only)
-    "4": "other",  # Other (any other grade span)
-}
+# Note: EDGE geocode data doesn't include school level or status.
+# All schools with valid lat/lon in the geocode file are included.
 
 # Earth radius in miles for distance calculation
 EARTH_RADIUS_MILES = 3958.8
@@ -62,10 +58,10 @@ DEG_PER_MILE = 1.0 / 69.0
 
 def download_nces_data(output_dir: Path) -> pd.DataFrame:
     """
-    Download and parse NCES Public School Universe data.
+    Download and parse NCES EDGE school location data.
 
-    Falls back to a direct CSV download if the zip approach fails.
-    Returns DataFrame with columns: nces_id, name, state, lat, lon, level, status, locale.
+    Tries multiple years of EDGE Geocode files (shapefiles with .dbf).
+    Returns DataFrame with columns: nces_id, name, state, lat, lon, locale.
     """
     import io
     import zipfile
@@ -79,56 +75,53 @@ def download_nces_data(output_dir: Path) -> pd.DataFrame:
         logger.info(f"Loading cached NCES data from {cache_path}")
         return pd.read_parquet(cache_path)
 
-    logger.info("Downloading NCES Public School Universe data...")
-    logger.info(f"URL: {NCES_URL}")
-
-    try:
-        with httpx.Client(timeout=120, follow_redirects=True) as client:
-            resp = client.get(NCES_URL)
-            resp.raise_for_status()
-
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
-            if not csv_names:
-                raise ValueError("No CSV found in NCES zip file")
-            logger.info(f"Extracting {csv_names[0]}...")
-            with zf.open(csv_names[0]) as csv_file:
-                df = pd.read_csv(
-                    csv_file,
-                    dtype=str,
-                    encoding="latin-1",
-                    low_memory=False,
-                )
-    except Exception as e:
-        logger.warning(f"Zip download failed ({e}), trying alternate URL...")
-        # Fallback: try a different year or format
-        alt_url = "https://nces.ed.gov/ccd/Data/zip/ccd_sch_029_2122_w_1a_091222.zip"
+    df = None
+    for url in NCES_URLS:
         try:
-            with httpx.Client(timeout=120, follow_redirects=True) as client:
-                resp = client.get(alt_url)
+            logger.info(f"Downloading NCES school data from {url}...")
+            with httpx.Client(timeout=180, follow_redirects=True) as client:
+                resp = client.get(url)
                 resp.raise_for_status()
 
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
-                if not csv_names:
-                    raise ValueError("No CSV in fallback zip")
-                with zf.open(csv_names[0]) as csv_file:
-                    df = pd.read_csv(
-                        csv_file,
-                        dtype=str,
-                        encoding="latin-1",
-                        low_memory=False,
-                    )
-        except Exception as e2:
-            logger.error(f"Both NCES downloads failed: {e2}")
-            raise
+                # Look for .dbf file (shapefile attribute table)
+                dbf_names = [n for n in zf.namelist() if n.lower().endswith(".dbf")]
+                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                xlsx_names = [n for n in zf.namelist() if n.lower().endswith(".xlsx")]
 
-    logger.info(f"Raw NCES data: {len(df)} rows, {len(df.columns)} columns")
+                if csv_names:
+                    logger.info(f"Extracting CSV: {csv_names[0]}")
+                    with zf.open(csv_names[0]) as f:
+                        df = pd.read_csv(f, dtype=str, encoding="latin-1", low_memory=False)
+                elif dbf_names:
+                    logger.info(f"Extracting DBF: {dbf_names[0]}")
+                    with zf.open(dbf_names[0]) as f:
+                        df = _read_dbf(f)
+                elif xlsx_names:
+                    logger.info(f"Extracting XLSX: {xlsx_names[0]}")
+                    with zf.open(xlsx_names[0]) as f:
+                        df = pd.read_excel(io.BytesIO(f.read()), dtype=str)
+                else:
+                    raise ValueError(f"No CSV/DBF/XLSX found in {url}")
 
-    # Find matching columns (NCES column names vary slightly by year)
+            logger.info(f"Downloaded {len(df)} school records")
+            break
+        except Exception as e:
+            logger.warning(f"Failed: {url} — {e}")
+            df = None
+            continue
+
+    if df is None:
+        raise RuntimeError("All NCES download URLs failed")
+
+    logger.info(f"Raw NCES data: {len(df)} rows, columns: {list(df.columns)}")
+
+    # Find matching columns (names vary slightly by year)
     col_map = {}
     for nces_col, our_col in NCES_COLUMNS.items():
-        matches = [c for c in df.columns if nces_col in c.upper()]
+        matches = [c for c in df.columns if c.upper().strip() == nces_col]
+        if not matches:
+            matches = [c for c in df.columns if nces_col in c.upper().strip()]
         if matches:
             col_map[matches[0]] = our_col
         else:
@@ -153,23 +146,49 @@ def download_nces_data(output_dir: Path) -> pd.DataFrame:
         & (df["lon"] <= -66.0)
     ]
 
-    # Filter: open schools only (status code "1" = open)
-    if "status" in df.columns:
-        # Keep open schools; if status column is messy, keep all
-        open_mask = df["status"].astype(str).str.strip().isin(["1", "Open", "OPEN"])
-        if open_mask.sum() > 0:
-            df = df[open_mask]
-            logger.info(f"Filtered to {len(df)} open schools")
-
-    # Map school level
-    if "level" in df.columns:
-        df["level"] = df["level"].astype(str).str.strip().map(LEVEL_MAP).fillna("other")
+    logger.info(f"Filtered to {len(df)} schools in continental US")
 
     # Cache
     df.to_parquet(cache_path, index=False)
     logger.info(f"Cached {len(df)} schools to {cache_path}")
 
     return df
+
+
+def _read_dbf(fileobj) -> pd.DataFrame:
+    """Read a DBF file into a pandas DataFrame (no external dependency)."""
+    import struct
+
+    data = fileobj.read()
+    numrec = struct.unpack_from("<I", data, 4)[0]
+    header_size = struct.unpack_from("<H", data, 8)[0]
+    record_size = struct.unpack_from("<H", data, 10)[0]
+
+    # Parse field descriptors (32 bytes each, starting at offset 32)
+    fields = []
+    offset = 32
+    while offset < header_size - 1 and data[offset] != 0x0D:
+        name = data[offset : offset + 11].split(b"\x00")[0].decode("ascii").strip()
+        ftype = chr(data[offset + 11])
+        fsize = data[offset + 16]
+        fields.append((name, ftype, fsize))
+        offset += 32
+
+    # Parse records
+    records = []
+    for i in range(numrec):
+        rec_offset = header_size + i * record_size
+        if data[rec_offset] == 0x2A:  # deleted record
+            continue
+        rec = {}
+        field_offset = rec_offset + 1  # skip deletion flag
+        for name, _ftype, fsize in fields:
+            raw = data[field_offset : field_offset + fsize].decode("latin-1").strip()
+            rec[name] = raw
+            field_offset += fsize
+        records.append(rec)
+
+    return pd.DataFrame(records)
 
 
 def build_school_tree(df: pd.DataFrame) -> cKDTree:
@@ -297,11 +316,9 @@ def save_school_data(output_dir: Path | None = None) -> Path:
     logger.info(f"Saved school data + KD-tree to {pkl_path}")
 
     # Print summary
-    if "level" in df.columns:
-        level_counts = df["level"].value_counts()
-        logger.info(f"School levels: {level_counts.to_dict()}")
     if "state" in df.columns:
         logger.info(f"States covered: {df['state'].nunique()}")
+    logger.info(f"Total schools: {len(df)}")
 
     return pkl_path
 
