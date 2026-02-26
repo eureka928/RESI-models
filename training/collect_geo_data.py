@@ -100,7 +100,9 @@ def download_zcta_centroids(output_dir: Path) -> pd.DataFrame:
 
     if cache_path.exists():
         logger.info(f"Loading cached ZCTA centroids from {cache_path}")
-        return pd.read_csv(cache_path, sep="\t", dtype={"GEOID": str})
+        df = pd.read_csv(cache_path, sep="\t", dtype={"GEOID": str})
+        df.columns = df.columns.str.strip()
+        return df
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -122,7 +124,9 @@ def download_zcta_centroids(output_dir: Path) -> pd.DataFrame:
 
             cache_path.write_bytes(content)
             logger.info(f"Saved ZCTA centroids to {cache_path}")
-            return pd.read_csv(io.BytesIO(content), sep="\t", dtype={"GEOID": str})
+            df = pd.read_csv(io.BytesIO(content), sep="\t", dtype={"GEOID": str})
+            df.columns = df.columns.str.strip()
+            return df
         except Exception as e:
             logger.warning(f"Failed to download from {url}: {e}")
             continue
