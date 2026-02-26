@@ -2,12 +2,20 @@
 End-to-end training pipeline orchestrator for RESI miner models.
 
 Runs the full sequence:
-1. Collect property data from Zillow (via RapidAPI - Real-Time Zillow Data)
-2. Collect geographic data (ZHVI + Census ACS + Redfin, build surfaces)
-3. Engineer features (raw JSON -> 79-feature Parquet)
-4. Train 4-model stacking ensemble (2 LightGBM + XGBoost + CatBoost + Ridge meta)
-5. Export to ONNX with baked-in geographic lookups (34 geo features)
-6. Validate the exported model
+1. Collect geographic data (ZHVI + Census ACS + Redfin, build surfaces)
+2. Collect NCES school data (free, ~100K US public schools)
+3. Search-only collection (2,500 API calls → ~100K property summaries)
+4. Select zpids for detail collection (price-stratified sampling)
+5. Detail collection (7,500 API calls → 7,500 fully detailed properties)
+6. Engineer features (both sources → 79-feature Parquet)
+7. Train 4-model stacking ensemble (2 LightGBM + XGBoost + CatBoost + Ridge meta)
+8. Export to ONNX with baked-in geographic lookups (34 geo features)
+9. Validate the exported model
+
+API Budget (Pro plan $25/month = 10,000 calls):
+  - Search: 2,500 calls × ~40 results = ~100K properties (basic features)
+  - Detail: 7,500 calls × 1 result = 7,500 properties (full 79 features)
+  - Total:  10,000 calls → ~107,500 properties
 
 Usage:
     # Full pipeline
@@ -21,6 +29,9 @@ Usage:
 
     # Quick test with minimal data
     python run_pipeline.py --skip-collect --skip-geo --output-model quick_model.onnx
+
+    # Custom API budget split
+    python run_pipeline.py --rapidapi-key YOUR_KEY --search-pages 50 --detail-budget 7500
 """
 
 import argparse
@@ -36,25 +47,10 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 
-def step_collect_data(api_key: str, num_properties: int) -> None:
-    """Step 1: Collect property data from Zillow API."""
-    logger.info("=" * 60)
-    logger.info("STEP 1: Collecting property data from Zillow API")
-    logger.info("=" * 60)
-
-    import asyncio
-
-    from collect_data import collect_all
-
-    asyncio.run(
-        collect_all(api_key=api_key, num_properties=num_properties)
-    )
-
-
 def step_collect_geo() -> None:
-    """Step 2: Download ZHVI + Census ACS + Redfin data and build geographic surfaces."""
+    """Step 1: Download ZHVI + Census ACS + Redfin data and build geographic surfaces."""
     logger.info("=" * 60)
-    logger.info("STEP 2: Collecting geographic data and building surfaces")
+    logger.info("STEP 1: Collecting geographic data and building surfaces")
     logger.info("=" * 60)
 
     from collect_geo_data import (
@@ -78,27 +74,109 @@ def step_collect_geo() -> None:
     build_and_save_all_surfaces(zip_data, GEO_SURFACES_DIR)
 
 
-def step_feature_engineer(min_price: float = 10000.0) -> Path:
-    """Step 3: Transform raw JSON to 79-feature Parquet."""
+def step_collect_schools() -> None:
+    """Step 2: Download NCES public school data and build spatial lookup."""
     logger.info("=" * 60)
-    logger.info("STEP 3: Engineering features from raw property data")
+    logger.info("STEP 2: Collecting NCES school data")
     logger.info("=" * 60)
 
-    from feature_engineer import DEFAULT_OUTPUT, RAW_DATA_DIR, process_raw_data
+    from collect_schools import save_school_data
 
-    df = process_raw_data(RAW_DATA_DIR, DEFAULT_OUTPUT, min_price=min_price)
+    save_school_data()
+
+
+def step_collect_search(api_key: str, max_pages: int = 50) -> None:
+    """Step 3: Search-only collection across all markets (~2,500 API calls)."""
+    logger.info("=" * 60)
+    logger.info("STEP 3: Search-only collection (~2,500 API calls)")
+    logger.info("=" * 60)
+
+    import asyncio
+
+    from collect_data import collect_all_search_only
+
+    asyncio.run(
+        collect_all_search_only(
+            api_key=api_key,
+            max_pages_per_market=max_pages,
+        )
+    )
+
+
+def step_select_details(num_details: int = 7500) -> Path:
+    """Step 4: Select zpids for detail collection using price-stratified sampling."""
+    logger.info("=" * 60)
+    logger.info(f"STEP 4: Selecting {num_details} zpids for detail collection")
+    logger.info("=" * 60)
+
+    from collect_data import select_detail_zpids
+
+    return select_detail_zpids(num_details=num_details)
+
+
+def step_collect_details(api_key: str, zpids_file: Path) -> None:
+    """Step 5: Fetch property details for selected zpids (~7,500 API calls)."""
+    logger.info("=" * 60)
+    logger.info("STEP 5: Detail collection for selected zpids")
+    logger.info("=" * 60)
+
+    import asyncio
+
+    from collect_data import collect_detail_zpids
+
+    asyncio.run(
+        collect_detail_zpids(
+            api_key=api_key,
+            zpids_file=zpids_file,
+        )
+    )
+
+
+def step_collect_data(api_key: str, num_properties: int) -> None:
+    """Legacy step: Collect property data (search + detail for every property)."""
+    logger.info("=" * 60)
+    logger.info("LEGACY: Collecting property data (search + detail per property)")
+    logger.info("=" * 60)
+
+    import asyncio
+
+    from collect_data import collect_all
+
+    asyncio.run(collect_all(api_key=api_key, num_properties=num_properties))
+
+
+def step_feature_engineer(
+    min_price: float = 10000.0, include_search: bool = True
+) -> Path:
+    """Step 6: Transform raw JSON to 79-feature Parquet."""
+    logger.info("=" * 60)
+    logger.info("STEP 6: Engineering features from property data")
+    logger.info("=" * 60)
+
+    from feature_engineer import (
+        DEFAULT_OUTPUT,
+        RAW_DATA_DIR,
+        SEARCH_DATA_DIR,
+        process_raw_data,
+    )
+
+    search_dir = SEARCH_DATA_DIR if include_search else None
+    df = process_raw_data(
+        RAW_DATA_DIR,
+        DEFAULT_OUTPUT,
+        min_price=min_price,
+        search_dir=search_dir,
+    )
     if df.empty:
         logger.error("Feature engineering produced no data!")
         sys.exit(1)
     return DEFAULT_OUTPUT
 
 
-def step_train(
-    dataset_path: Path, skip_geo: bool = False
-) -> Path:
-    """Step 4: Train 4-model stacking ensemble (2 LightGBM + XGBoost + CatBoost + Ridge meta)."""
+def step_train(dataset_path: Path, skip_geo: bool = False) -> Path:
+    """Step 7: Train 4-model stacking ensemble (2 LightGBM + XGBoost + CatBoost + Ridge meta)."""
     logger.info("=" * 60)
-    logger.info("STEP 4: Training 4-model stacking ensemble")
+    logger.info("STEP 7: Training 4-model stacking ensemble")
     logger.info("=" * 60)
 
     from train_model import DEFAULT_GEO_DIR, DEFAULT_MODEL_DIR, train_ensemble
@@ -116,9 +194,9 @@ def step_train(
 
 
 def step_export(model_dir: Path, output_path: Path, skip_geo: bool = False) -> Path:
-    """Step 5: Export 4-model stacking ensemble to ONNX with baked-in geo lookups."""
+    """Step 8: Export 4-model stacking ensemble to ONNX with baked-in geo lookups."""
     logger.info("=" * 60)
-    logger.info("STEP 5: Exporting stacking ensemble to ONNX")
+    logger.info("STEP 8: Exporting stacking ensemble to ONNX")
     logger.info("=" * 60)
 
     from export_onnx import DEFAULT_GEO_DIR, export_onnx
@@ -138,9 +216,9 @@ def step_export(model_dir: Path, output_path: Path, skip_geo: bool = False) -> P
 
 
 def step_validate(model_path: Path) -> None:
-    """Step 6: Final validation with miner-cli style checks."""
+    """Step 9: Final validation with miner-cli style checks."""
     logger.info("=" * 60)
-    logger.info("STEP 6: Final validation")
+    logger.info("STEP 9: Final validation")
     logger.info("=" * 60)
 
     import numpy as np
@@ -156,7 +234,7 @@ def step_validate(model_path: Path) -> None:
     logger.info(f"Model size: {size_mb:.1f} MB")
 
     if size_mb > 200:
-        logger.error(f"Model exceeds 200 MB limit!")
+        logger.error("Model exceeds 200 MB limit!")
         return
 
     # Check ONNX validity
@@ -168,14 +246,16 @@ def step_validate(model_path: Path) -> None:
         return
 
     # Load and check interface
-    session = ort.InferenceSession(
-        str(model_path), providers=["CPUExecutionProvider"]
-    )
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     inputs = session.get_inputs()
     outputs = session.get_outputs()
 
-    logger.info(f"Input: name={inputs[0].name}, shape={inputs[0].shape}, type={inputs[0].type}")
-    logger.info(f"Output: name={outputs[0].name}, shape={outputs[0].shape}, type={outputs[0].type}")
+    logger.info(
+        f"Input: name={inputs[0].name}, shape={inputs[0].shape}, type={inputs[0].type}"
+    )
+    logger.info(
+        f"Output: name={outputs[0].name}, shape={outputs[0].shape}, type={outputs[0].type}"
+    )
 
     if inputs[0].shape[1] != 79:
         logger.error(f"Expected 79 input features, got {inputs[0].shape[1]}")
@@ -186,7 +266,12 @@ def step_validate(model_path: Path) -> None:
         # Load test samples from the subnet
         import json
 
-        test_path = Path(__file__).parent.parent / "real_estate" / "miner_cli" / "test_samples.json"
+        test_path = (
+            Path(__file__).parent.parent
+            / "real_estate"
+            / "miner_cli"
+            / "test_samples.json"
+        )
         if test_path.exists():
             with open(test_path) as f:
                 test_data = json.load(f)
@@ -230,8 +315,10 @@ def step_validate(model_path: Path) -> None:
     logger.info(f"Model ready at: {model_path.absolute()}")
     logger.info(
         "\nNext steps:"
-        "\n  1. Test locally: uv run miner-cli evaluate --model.path " + str(model_path)
-        + "\n  2. Submit: uv run miner-cli submit --model.path " + str(model_path)
+        "\n  1. Test locally: uv run miner-cli evaluate --model.path "
+        + str(model_path)
+        + "\n  2. Submit: uv run miner-cli submit --model.path "
+        + str(model_path)
         + " --hf.repo_id YOUR/REPO --wallet.name miner"
     )
 
@@ -249,7 +336,7 @@ def main():
         "--num-properties",
         type=int,
         default=50000,
-        help="Target number of properties to collect",
+        help="Target number of properties (legacy mode only)",
     )
     parser.add_argument(
         "--collect-only",
@@ -259,12 +346,17 @@ def main():
     parser.add_argument(
         "--skip-collect",
         action="store_true",
-        help="Skip property data collection (use existing raw_data/)",
+        help="Skip property data collection (use existing data)",
     )
     parser.add_argument(
         "--skip-geo",
         action="store_true",
         help="Skip geographic data collection and surface building",
+    )
+    parser.add_argument(
+        "--skip-schools",
+        action="store_true",
+        help="Skip NCES school data collection",
     )
     parser.add_argument(
         "--output-model",
@@ -278,14 +370,41 @@ def main():
         default=10000.0,
         help="Minimum sale price filter for training data",
     )
+    # Hybrid collection budget controls
+    parser.add_argument(
+        "--search-pages",
+        type=int,
+        default=50,
+        help="Max search result pages per market (50 markets × N pages = API calls)",
+    )
+    parser.add_argument(
+        "--detail-budget",
+        type=int,
+        default=7500,
+        help="Number of zpids to select for detail collection",
+    )
+    parser.add_argument(
+        "--legacy-collect",
+        action="store_true",
+        help="Use legacy collection mode (search + detail per property)",
+    )
     args = parser.parse_args()
 
     start_time = time.time()
 
-    # Step 1: Collect property data
+    # Step 1: Collect geographic data
+    if not args.skip_geo:
+        step_collect_geo()
+
+    # Step 2: Collect school data
+    if not args.skip_schools:
+        step_collect_schools()
+
+    # Steps 3-5: Property data collection
     if not args.skip_collect:
         if not args.rapidapi_key:
             import os
+
             args.rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
         if not args.rapidapi_key:
             logger.error(
@@ -293,26 +412,35 @@ def main():
                 "Use --skip-collect to use existing data in training/raw_data/"
             )
             sys.exit(1)
-        step_collect_data(args.rapidapi_key, args.num_properties)
 
-    # Step 2: Collect geographic data
-    if not args.skip_geo:
-        step_collect_geo()
+        if args.legacy_collect:
+            # Legacy mode: search + detail for every property
+            step_collect_data(args.rapidapi_key, args.num_properties)
+        else:
+            # New hybrid mode: search-heavy + strategic details
+            # Step 3: Search-only collection
+            step_collect_search(args.rapidapi_key, max_pages=args.search_pages)
+
+            # Step 4: Select zpids for detail collection
+            zpids_file = step_select_details(num_details=args.detail_budget)
+
+            # Step 5: Detail collection for selected zpids
+            step_collect_details(args.rapidapi_key, zpids_file)
 
     if args.collect_only:
         logger.info("Collection complete (--collect-only specified)")
         return
 
-    # Step 3: Feature engineering
+    # Step 6: Feature engineering (processes both raw_data/ and search_data/)
     dataset_path = step_feature_engineer(min_price=args.min_price)
 
-    # Step 4: Train models
+    # Step 7: Train models
     model_dir = step_train(dataset_path, skip_geo=args.skip_geo)
 
-    # Step 5: Export to ONNX
+    # Step 8: Export to ONNX
     onnx_path = step_export(model_dir, args.output_model, skip_geo=args.skip_geo)
 
-    # Step 6: Validate
+    # Step 9: Validate
     step_validate(onnx_path)
 
     elapsed = time.time() - start_time

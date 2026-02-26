@@ -8,19 +8,21 @@ Train competitive ONNX models for RESI Subnet 46 (Bittensor real estate price pr
 # Install dependencies
 pip install -r requirements.txt
 
-# Option A: Full pipeline with data collection
-export RAPIDAPI_KEY=your_key_here
+# Set up your API key
+cp .env.example .env
+# Edit .env and add your RapidAPI key
+
+# Option A: Full pipeline (search-heavy hybrid, $25 for ~107K properties)
 python run_pipeline.py
 
 # Option B: Skip data collection (use existing data)
-python run_pipeline.py --skip-collect --skip-geo
+python run_pipeline.py --skip-collect --skip-geo --skip-schools
 
-# Option C: Step by step
-python collect_data.py --rapidapi-key YOUR_KEY --num-properties 50000
-python collect_geo_data.py
-python feature_engineer.py
-python train_model.py
-python export_onnx.py
+# Option C: Custom API budget split
+python run_pipeline.py --search-pages 50 --detail-budget 7500
+
+# Option D: Legacy mode (detail every property)
+python run_pipeline.py --legacy-collect --rapidapi-key YOUR_KEY
 ```
 
 ## Architecture
@@ -47,12 +49,24 @@ The final ONNX model accepts the standard **(batch, 79)** float32 input and outp
 
 | Step | Script | Description |
 |------|--------|-------------|
-| 1 | `collect_data.py` | Fetch recently sold properties from Zillow via RapidAPI |
-| 2 | `collect_geo_data.py` | Download ZHVI + Census ACS + Redfin data, build geo surfaces |
-| 3 | `feature_engineer.py` | Transform raw JSON -> 79-feature Parquet |
-| 4 | `train_model.py` | Train 4-model stacking ensemble with Ridge meta-learner |
-| 5 | `export_onnx.py` | Export to single ONNX with baked-in geo lookups |
-| 6 | `run_pipeline.py` | Orchestrate all steps end-to-end |
+| 1 | `collect_geo_data.py` | Download ZHVI + Census ACS + Redfin data, build geo surfaces |
+| 2 | `collect_schools.py` | Download NCES public school data (~100K schools), build KD-tree |
+| 3 | `collect_data.py` (search) | Search-only collection: 2,500 API calls → ~100K property summaries |
+| 4 | `collect_data.py` (select) | Price-stratified sampling: pick 7,500 zpids for detail collection |
+| 5 | `collect_data.py` (detail) | Detail collection: 7,500 API calls → 7,500 fully detailed properties |
+| 6 | `feature_engineer.py` | Transform both sources → 79-feature Parquet |
+| 7 | `train_model.py` | Train 4-model stacking ensemble with Ridge meta-learner |
+| 8 | `export_onnx.py` | Export to single ONNX with baked-in geo lookups |
+| 9 | `run_pipeline.py` | Orchestrate all steps end-to-end |
+
+### API Budget ($25/month Pro plan = 10,000 calls)
+
+| Phase | API Calls | Properties | Features |
+|-------|-----------|-----------|----------|
+| Search | 2,500 | ~100,000 | ~22 of 79 |
+| Detail | 7,500 | 7,500 | 79 of 79 |
+| NCES schools | 0 (free) | All | +7 school features |
+| Geo surfaces | 0 (free) | All | +34 ONNX geo features |
 
 ## RapidAPI Setup (Step-by-Step)
 
@@ -86,12 +100,13 @@ After subscribing:
 ### 4. Set the Key
 
 ```bash
-export RAPIDAPI_KEY=your_key_here
+cp .env.example .env
+# Edit .env and paste your key
 ```
 
-Or pass it directly:
+Or export directly:
 ```bash
-python collect_data.py --rapidapi-key your_key_here
+export RAPIDAPI_KEY=your_key_here
 ```
 
 ### 5. Test It
@@ -176,15 +191,20 @@ ls -lh training/model.onnx
 training/
 ├── README.md
 ├── requirements.txt          # Training dependencies (LightGBM, XGBoost, CatBoost, etc.)
+├── .env.example              # Template for API keys
+├── .env                      # (gitignored) Your actual API keys
 ├── config.py                 # Constants, 79-feature order, hyperparameters for all 4 models
-├── collect_data.py           # Zillow API data collection (Real-Time Zillow Data)
+├── collect_data.py           # Zillow API data collection (search + detail modes)
 ├── collect_geo_data.py       # ZHVI + Census ACS + Redfin download + surface building
-├── feature_engineer.py       # Raw JSON -> 79-feature Parquet
+├── collect_schools.py        # NCES public school data + KD-tree spatial lookup
+├── feature_engineer.py       # Raw JSON + search JSON -> 79-feature Parquet
 ├── geo_features.py           # Lat/lon -> 34 geographic feature lookups
 ├── train_model.py            # 4-model stacking ensemble + Ridge meta-learner
 ├── export_onnx.py            # ONNX export with baked-in geo lookups + meta-learner
-├── run_pipeline.py           # End-to-end orchestrator
-├── raw_data/                 # (generated) Raw property JSON files
+├── run_pipeline.py           # End-to-end 9-step orchestrator
+├── raw_data/                 # (generated) Detailed property JSON files
+├── search_data/              # (generated) Search-only property JSON files
+├── school_data/              # (generated) NCES school data + KD-tree pickle
 ├── geo_data/                 # (generated) Cached ZHVI/ZCTA/Census/Redfin downloads
 ├── geo_surfaces/             # (generated) Geographic surface .npy files (17 per grid)
 ├── models/                   # (generated) Trained model .pkl files (m1-m4 + meta + metadata)
