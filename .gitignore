@@ -161,6 +161,15 @@ cython_debug/
 
 testing/
 
+# Training pipeline generated data
+training/raw_data/
+training/search_data/
+training/school_data/
+training/geo_data/
+training/geo_surfaces/
+training/models/
+training/dataset.parquet
+
 # Editors
 .vscode/settings.json
 
