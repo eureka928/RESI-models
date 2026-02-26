@@ -83,7 +83,6 @@ def convert_lgbm_to_onnx(model, n_features: int, name: str) -> onnx.ModelProto:
         )
     patched_booster = lgb.Booster(model_str=model_str)
     model._Booster = patched_booster
-    model.objective_ = "regression"
 
     initial_type = [("input", FloatTensorType([None, n_features]))]
     return convert_lightgbm(model, initial_types=initial_type, name=name)
