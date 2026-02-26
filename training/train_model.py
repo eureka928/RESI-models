@@ -182,12 +182,13 @@ def train_catboost(
 
     model = cb.CatBoostRegressor(
         random_seed=42,
-        feature_names=feature_names,
         **fit_params,
     )
+    pool_train = cb.Pool(X_train, y_train, feature_names=feature_names)
+    pool_val = cb.Pool(X_val, y_val, feature_names=feature_names)
     model.fit(
-        X_train, y_train,
-        eval_set=(X_val, y_val),
+        pool_train,
+        eval_set=pool_val,
         early_stopping_rounds=100,
     )
 
