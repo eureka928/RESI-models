@@ -321,9 +321,9 @@ def build_sample_json(df: pd.DataFrame, indices: list[int]) -> list[dict]:
 def generate_test_samples(
     dataset_path: Path = DEFAULT_DATASET,
     model_path: Path = DEFAULT_MODEL,
-    num_realistic: int = 300,
+    num_realistic: int = 600,
     num_error: int = 100,
-    num_challenge: int = 100,
+    num_challenge: int = 200,
     output_path: Path = OUTPUT_PATH,
     seed: int = 42,
 ):
@@ -430,7 +430,7 @@ def main():
         help="Path to ONNX model for finding worst predictions",
     )
     parser.add_argument(
-        "--num-realistic", type=int, default=300,
+        "--num-realistic", type=int, default=600,
         help="Number of validator-realistic samples (price-weighted)",
     )
     parser.add_argument(
@@ -438,7 +438,7 @@ def main():
         help="Number of model error cases (worst predictions)",
     )
     parser.add_argument(
-        "--num-challenge", type=int, default=100,
+        "--num-challenge", type=int, default=200,
         help="Number of challenging but realistic cases",
     )
     parser.add_argument(
