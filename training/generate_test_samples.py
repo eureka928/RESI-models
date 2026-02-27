@@ -1,25 +1,29 @@
 """
 Generate diverse + hard edge case test samples for miner-cli local evaluation.
 
-Two modes:
+Three layers:
   1. Basic (50 stratified samples): diverse coverage across price ranges
-  2. Edge cases (200 hard samples): properties most likely to cause high MAPE
+  2. Edge cases (200 hard samples): model errors + statistical outliers
+  3. Validator failure cases (250 hard samples): patterns that cause top models
+     to fail during daily evaluation — sentinel defaults, unknown home types,
+     search-only zero-feature properties, price boundaries, zero-area ratios
 
 Edge cases are identified by:
   - Model prediction errors (if model.onnx exists) — worst predictions
   - Statistical outliers — extreme values in key features
   - Boundary properties — near price clip bounds, unusual price/sqft
   - Rare property types — manufactured, multi-family, lots
+  - Validator failure patterns — sentinel defaults, zero features, encoding gaps
 
 Usage:
-    # Generate 50 basic + 200 edge cases (250 total)
+    # Generate 50 basic + 200 edge + 250 validator-failure = 500 total
     cd training && python generate_test_samples.py
 
     # Basic only (50 samples)
     python generate_test_samples.py --basic-only
 
     # Custom counts
-    python generate_test_samples.py --num-basic 50 --num-edge 200
+    python generate_test_samples.py --num-basic 50 --num-edge 200 --num-validator 250
 """
 
 import argparse
@@ -30,7 +34,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import FEATURE_ORDER, MIN_PRICE, MAX_PRICE
+from config import (
+    FEATURE_ORDER, MIN_PRICE, MAX_PRICE,
+    SCHOOL_RATING_DEFAULT, MIN_SCHOOL_DISTANCE_DEFAULT,
+    YEARS_SINCE_LAST_SALE_DEFAULT, MONTHS_SINCE_LAST_SALE_DEFAULT,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -260,6 +268,189 @@ def find_statistical_edge_cases(
     return result
 
 
+def find_validator_failure_cases(
+    df: pd.DataFrame, num_cases: int, rng: np.random.RandomState,
+    exclude_idx: set[int],
+) -> list[int]:
+    """Find properties matching patterns that cause top models to fail during
+    validator evaluation.
+
+    These target specific encoding/feature gaps in the validator pipeline:
+    sentinel defaults, unknown home types, zero-feature search-only properties,
+    zero-area ratio issues, and properties in tricky price ranges.
+    """
+    selected = set()
+    budget = num_cases
+
+    def _pick(mask_or_idx, label: str, n: int = 8):
+        """Pick up to n samples from mask, respecting exclusions."""
+        nonlocal selected
+        if isinstance(mask_or_idx, pd.Series):
+            candidates = df[mask_or_idx].index.tolist()
+        else:
+            candidates = list(mask_or_idx)
+        candidates = [i for i in candidates if i not in exclude_idx and i not in selected]
+        if not candidates:
+            logger.info(f"    {label}: 0 available")
+            return
+        n_take = min(n, len(candidates))
+        chosen = rng.choice(candidates, size=n_take, replace=False).tolist()
+        selected.update(chosen)
+        logger.info(f"    {label}: +{n_take} samples")
+
+    # === CATEGORY 1: Unknown / unusual home types ===
+    # When home type doesn't match any known category, all one-hot = 0 and
+    # home_type_nan = 1. Models trained mostly on SINGLE_FAMILY struggle here.
+    logger.info("  [Cat 1] Unknown / unusual home types")
+    if "home_type_nan" in df.columns:
+        _pick(df["home_type_nan"] == 1.0, "home_type_nan=1 (unknown type)", n=15)
+    if "home_type_HOME_TYPE_UNKNOWN" in df.columns:
+        _pick(df["home_type_HOME_TYPE_UNKNOWN"] == 1.0, "HOME_TYPE_UNKNOWN", n=10)
+    # Condos/townhouses often mapped to nan since they're not in the 5 categories
+    if "home_type_MULTI_FAMILY" in df.columns:
+        _pick(df["home_type_MULTI_FAMILY"] == 1.0, "MULTI_FAMILY", n=8)
+    if "home_type_LOT" in df.columns:
+        _pick(df["home_type_LOT"] == 1.0, "LOT (land-only)", n=8)
+    if "home_type_MANUFACTURED" in df.columns:
+        _pick(df["home_type_MANUFACTURED"] == 1.0, "MANUFACTURED", n=8)
+
+    # === CATEGORY 2: Sentinel school defaults (no nearby schools) ===
+    # Rural properties with no NCES schools within search radius get sentinel
+    # defaults: school_count=0, all ratings=5.5, min_distance=1.2
+    logger.info("  [Cat 2] Sentinel school defaults (rural/no schools)")
+    if "school_count" in df.columns and "avg_school_rating" in df.columns:
+        # No schools at all
+        _pick(df["school_count"] == 0, "school_count=0", n=15)
+        # Sentinel rating (5.5 default)
+        sentinel_rating = np.isclose(df["avg_school_rating"], SCHOOL_RATING_DEFAULT, atol=0.01)
+        _pick(sentinel_rating, "avg_school_rating=5.5 (sentinel)", n=10)
+    if "min_school_distance" in df.columns:
+        # Sentinel distance (1.2 default — means no school found)
+        sentinel_dist = np.isclose(df["min_school_distance"], MIN_SCHOOL_DISTANCE_DEFAULT, atol=0.01)
+        _pick(sentinel_dist, "min_school_distance=1.2 (sentinel)", n=8)
+
+    # === CATEGORY 3: No previous sale data (sentinel sale defaults) ===
+    # New construction or properties with no price history get sentinels:
+    # years_since_last_sale=12, months=144, previous_sale_price=0, all change=0
+    logger.info("  [Cat 3] No previous sale data (new construction / first sale)")
+    if "has_previous_sale_data" in df.columns:
+        _pick(df["has_previous_sale_data"] == 0.0, "no previous sale data", n=15)
+    if "is_new_construction" in df.columns:
+        _pick(df["is_new_construction"] == 1.0, "new construction", n=10)
+    if "years_since_last_sale" in df.columns:
+        sentinel_sale = np.isclose(df["years_since_last_sale"], YEARS_SINCE_LAST_SALE_DEFAULT, atol=0.1)
+        _pick(sentinel_sale, "years_since_last_sale=12 (sentinel)", n=8)
+
+    # === CATEGORY 4: Zero/near-zero living area (ratio division issues) ===
+    # When living_area=0, lot_to_living_ratio = inf or 0, beds_per_bath = nan
+    # These cause unpredictable model behavior
+    logger.info("  [Cat 4] Zero/near-zero key features (ratio edge cases)")
+    _pick(df["living_area_sqft"] == 0, "living_area=0", n=8)
+    _pick(df["living_area_sqft"] < 200, "living_area<200 (tiny)", n=5)
+    _pick(df["bathrooms"] == 0, "bathrooms=0 (ratio issues)", n=5)
+    _pick(df["bedrooms"] == 0, "bedrooms=0", n=5)
+    if "lot_to_living_ratio" in df.columns:
+        _pick(df["lot_to_living_ratio"] > 100, "extreme lot/living ratio >100", n=5)
+        _pick(df["lot_to_living_ratio"] == 0, "lot/living ratio = 0", n=3)
+
+    # === CATEGORY 5: Search-only properties (many zero features) ===
+    # Properties from search-only collection have ~57 features as 0.0
+    # (only ~22 features available from search results)
+    logger.info("  [Cat 5] Search-only properties (many zero features)")
+    # Count how many features are exactly 0 per row
+    feature_cols = [f for f in FEATURE_ORDER if f in df.columns]
+    zero_count = (df[feature_cols] == 0.0).sum(axis=1)
+    _pick(zero_count >= 50, "50+ zero features (search-only)", n=15)
+    _pick(zero_count >= 40, "40+ zero features (sparse data)", n=10)
+
+    # === CATEGORY 6: Price boundary stress test ===
+    # Properties near the MIN_PRICE/MAX_PRICE clip bounds are tricky because
+    # any prediction bias gets amplified at the boundary
+    logger.info("  [Cat 6] Price boundary stress tests")
+    _pick(
+        (df["price"] >= MIN_PRICE) & (df["price"] < MIN_PRICE * 1.1),
+        f"price near floor ($50K-$55K)", n=10,
+    )
+    _pick(
+        (df["price"] >= MIN_PRICE * 1.1) & (df["price"] < MIN_PRICE * 1.5),
+        f"price $55K-$75K (ultra-cheap)", n=8,
+    )
+    _pick(
+        (df["price"] >= 75_000) & (df["price"] < 100_000),
+        f"price $75K-$100K (cheap rural)", n=8,
+    )
+    _pick(
+        (df["price"] > 5_000_000) & (df["price"] <= MAX_PRICE),
+        "price $5M+ (ultra-luxury)", n=8,
+    )
+    _pick(
+        (df["price"] > 3_000_000) & (df["price"] <= 5_000_000),
+        "price $3M-$5M (luxury)", n=5,
+    )
+
+    # === CATEGORY 7: Extreme price/sqft (valuation anomalies) ===
+    # Very high or low $/sqft properties confuse models — likely condos in
+    # expensive cities vs rural land
+    logger.info("  [Cat 7] Extreme price/sqft (valuation anomalies)")
+    price_per_sqft = df["price"] / df["living_area_sqft"].replace(0, np.nan)
+    _pick(price_per_sqft > 1000, "price/sqft > $1000", n=8)
+    _pick(price_per_sqft < 30, "price/sqft < $30 (very cheap)", n=5)
+    _pick(
+        (price_per_sqft > 500) & (price_per_sqft <= 1000),
+        "price/sqft $500-$1000 (expensive metro)", n=5,
+    )
+
+    # === CATEGORY 8: Geographic edge cases ===
+    # Properties at extreme latitudes/longitudes fall outside the dense
+    # geographic surface data, getting poor geo feature values
+    logger.info("  [Cat 8] Geographic edge cases")
+    _pick(df["latitude"] > 47, "high latitude (northern states)", n=5)
+    _pick(df["latitude"] < 26, "low latitude (southern FL/HI)", n=5)
+    _pick(df["longitude"] > -70, "eastern longitude (New England coast)", n=5)
+    _pick(df["longitude"] < -122, "western longitude (Pacific coast)", n=5)
+
+    # === CATEGORY 9: Feature combination stress ===
+    # Unusual combinations that models rarely see together
+    logger.info("  [Cat 9] Unusual feature combinations")
+    if "has_pool" in df.columns and "has_fireplace" in df.columns:
+        _pick(
+            (df["has_pool"] == 1.0) & (df["has_fireplace"] == 1.0) & (df["price"] < 200_000),
+            "pool+fireplace but cheap (<$200K)", n=5,
+        )
+    if "stories" in df.columns:
+        _pick(df["stories"] >= 4, "4+ stories", n=3)
+    _pick(df["bedrooms"] >= 7, "7+ bedrooms", n=5)
+    _pick(df["bathrooms"] >= 6, "6+ bathrooms", n=3)
+    if "garage_capacity" in df.columns:
+        _pick(df["garage_capacity"] >= 4, "4+ car garage", n=3)
+    if "fireplaces_count" in df.columns:
+        _pick(df["fireplaces_count"] >= 3, "3+ fireplaces", n=3)
+
+    # === CATEGORY 10: All amenity flags off ===
+    # Properties with zero amenities — no pool, no garage, no fireplace,
+    # no cooling, no heating — these get minimal feature signal
+    logger.info("  [Cat 10] Minimal amenity properties")
+    bool_features = [
+        "has_garage", "has_cooling", "has_heating", "has_fireplace",
+        "has_pool", "has_spa", "has_view",
+    ]
+    available_bools = [f for f in bool_features if f in df.columns]
+    if available_bools:
+        amenity_sum = df[available_bools].sum(axis=1)
+        _pick(amenity_sum == 0, "zero amenity flags (no pool/garage/cooling/etc)", n=10)
+        # Also max amenities
+        _pick(amenity_sum == len(available_bools), "all amenity flags on", n=5)
+
+    result = list(selected - exclude_idx)
+    logger.info(f"  Total validator failure cases: {len(result)}")
+
+    # Trim to requested size or fill remainder
+    if len(result) > num_cases:
+        result = rng.choice(result, size=num_cases, replace=False).tolist()
+
+    return result
+
+
 def build_sample_json(df: pd.DataFrame, indices: list[int]) -> list[dict]:
     """Convert DataFrame rows to test sample JSON format."""
     samples = []
@@ -288,11 +479,12 @@ def generate_test_samples(
     model_path: Path = DEFAULT_MODEL,
     num_basic: int = 50,
     num_edge: int = 200,
+    num_validator: int = 250,
     output_path: Path = OUTPUT_PATH,
     basic_only: bool = False,
     seed: int = 123,
 ):
-    """Generate test samples combining basic stratified + edge cases."""
+    """Generate test samples: basic stratified + edge cases + validator failure cases."""
     df = load_dataset(dataset_path)
     rng = np.random.RandomState(seed)
 
@@ -303,6 +495,7 @@ def generate_test_samples(
     logger.info(f"Selected {len(basic_idx)} basic samples")
 
     edge_idx = []
+    validator_idx = []
     if not basic_only:
         # Step 2: Model-based error cases (worst predictions)
         logger.info(f"\n=== Finding model prediction error cases ===")
@@ -319,7 +512,7 @@ def generate_test_samples(
         all_selected.update(stat_cases)
         logger.info(f"Found {len(stat_cases)} statistical edge cases")
 
-        # Fill any remaining slots randomly from unselected data
+        # Fill any remaining edge slots randomly
         total_edge = len(edge_idx)
         if total_edge < num_edge:
             remaining = list(set(df.index) - all_selected)
@@ -327,23 +520,42 @@ def generate_test_samples(
                 extra = min(num_edge - total_edge, len(remaining))
                 fill = rng.choice(remaining, size=extra, replace=False).tolist()
                 edge_idx.extend(fill)
+                all_selected.update(fill)
                 logger.info(f"Filled {extra} remaining edge case slots randomly")
 
+        # Step 4: Validator failure pattern cases
+        logger.info(f"\n=== Finding {num_validator} validator failure cases ===")
+        val_cases = find_validator_failure_cases(df, num_validator, rng, all_selected)
+        validator_idx.extend(val_cases)
+        all_selected.update(val_cases)
+        logger.info(f"Found {len(val_cases)} validator failure cases")
+
+        # Fill any remaining validator slots randomly
+        if len(validator_idx) < num_validator:
+            remaining = list(set(df.index) - all_selected)
+            if remaining:
+                extra = min(num_validator - len(validator_idx), len(remaining))
+                fill = rng.choice(remaining, size=extra, replace=False).tolist()
+                validator_idx.extend(fill)
+                logger.info(f"Filled {extra} remaining validator failure slots randomly")
+
     # Build output
-    all_indices = basic_idx + edge_idx
+    all_indices = basic_idx + edge_idx + validator_idx
     samples = build_sample_json(df, all_indices)
 
-    # Tag samples with their category
+    # Count by category
     basic_set = set(basic_idx)
     edge_set = set(edge_idx)
+    validator_set = set(validator_idx)
 
     n_basic = sum(1 for idx in all_indices if idx in basic_set)
     n_edge = sum(1 for idx in all_indices if idx in edge_set)
+    n_validator = sum(1 for idx in all_indices if idx in validator_set)
 
     output = {
         "description": (
             f"Test samples for miner CLI local evaluation. "
-            f"{n_basic} basic stratified + {n_edge} edge cases = {len(samples)} total. "
+            f"{n_basic} basic + {n_edge} edge + {n_validator} validator-failure = {len(samples)} total. "
             f"Features match feature_config.yaml order (79 features)."
         ),
         "samples": samples,
@@ -358,8 +570,9 @@ def generate_test_samples(
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Saved {len(samples)} test samples to {output_path}")
     logger.info(f"File size: {output_path.stat().st_size / 1024:.1f} KB")
-    logger.info(f"  Basic samples: {n_basic}")
-    logger.info(f"  Edge cases:    {n_edge}")
+    logger.info(f"  Basic samples:          {n_basic}")
+    logger.info(f"  Edge cases:             {n_edge}")
+    logger.info(f"  Validator failure cases: {n_validator}")
     logger.info(f"  Price range:   ${min(prices):,.0f} - ${max(prices):,.0f}")
     logger.info(f"  Median price:  ${sorted(prices)[len(prices)//2]:,.0f}")
 
@@ -399,8 +612,12 @@ def main():
         help="Number of edge case samples",
     )
     parser.add_argument(
+        "--num-validator", type=int, default=250,
+        help="Number of validator failure pattern samples",
+    )
+    parser.add_argument(
         "--basic-only", action="store_true",
-        help="Only generate basic stratified samples (no edge cases)",
+        help="Only generate basic stratified samples (no edge/validator cases)",
     )
     parser.add_argument(
         "--output", type=Path, default=OUTPUT_PATH,
@@ -417,6 +634,7 @@ def main():
         model_path=args.model,
         num_basic=args.num_basic,
         num_edge=args.num_edge,
+        num_validator=args.num_validator,
         output_path=args.output,
         basic_only=args.basic_only,
         seed=args.seed,
