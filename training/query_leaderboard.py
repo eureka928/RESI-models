@@ -126,66 +126,50 @@ def _parse_raw_commitment(raw: dict) -> dict | None:
         return {"hf_repo_id": "?", "model_hash": "?", "block": block}
 
 
-def query_commitments(sub, meta):
-    """Query on-chain commitments for all neurons."""
+def query_commitments(sub, meta, debug: bool = False):
+    """Query on-chain commitments for all neurons via substrate query."""
     commitments = {}
     hotkeys = list(meta.hotkeys)
 
     print(f"Fetching commitments for {len(hotkeys)} neurons...")
 
-    # Method 1: Try SDK built-in get_commitment() (bittensor >= 10.x)
-    get_commitment_fn = getattr(sub, "get_commitment", None)
+    substrate = getattr(sub, "substrate", None)
+    if substrate is None:
+        print("  ERROR: Cannot access substrate interface")
+        return commitments
 
     for i, hotkey in enumerate(hotkeys):
         if i % 50 == 0 and i > 0:
             print(f"  ...checked {i}/{len(hotkeys)} neurons")
         try:
-            if get_commitment_fn:
-                result = get_commitment_fn(netuid=NETUID, hotkey=hotkey)
-                if result:
-                    # SDK may return parsed data or raw dict
-                    if isinstance(result, dict):
-                        if "r" in result:
-                            commitments[hotkey] = {
-                                "hf_repo_id": result.get("r", ""),
-                                "model_hash": result.get("h", ""),
-                                "block": result.get("block", 0),
-                            }
-                        else:
-                            parsed = _parse_raw_commitment(result)
-                            if parsed:
-                                commitments[hotkey] = parsed
-                    elif isinstance(result, str):
-                        # May return JSON string
-                        try:
-                            data = json.loads(result)
-                            commitments[hotkey] = {
-                                "hf_repo_id": data.get("r", ""),
-                                "model_hash": data.get("h", ""),
-                                "block": data.get("block", 0),
-                            }
-                        except json.JSONDecodeError:
-                            pass
-                    continue
+            result = substrate.query(
+                module="Commitments",
+                storage_function="CommitmentOf",
+                params=[NETUID, hotkey],
+            )
+            if result is None:
+                continue
 
-            # Method 2: Raw substrate query fallback
-            substrate = getattr(sub, "substrate", None)
-            if substrate:
-                result = substrate.query(
-                    module="Commitments",
-                    storage_function="CommitmentOf",
-                    params=[NETUID, hotkey],
-                )
-                if result is None:
-                    continue
-                raw = result.value if hasattr(result, "value") else result
-                if not raw or raw.get("block", 0) == 0:
-                    continue
-                parsed = _parse_raw_commitment(raw)
-                if parsed:
-                    commitments[hotkey] = parsed
+            raw = result.value if hasattr(result, "value") else result
+            if not raw or not isinstance(raw, dict):
+                continue
 
-        except Exception:
+            block = raw.get("block", 0)
+            if block == 0:
+                continue
+
+            if debug and len(commitments) == 0:
+                print(f"  [DEBUG] First raw commitment (UID {i}): {raw}")
+
+            parsed = _parse_raw_commitment(raw)
+            if parsed:
+                commitments[hotkey] = parsed
+            elif debug:
+                print(f"  [DEBUG] Failed to parse commitment for {hotkey[:12]}..., raw: {raw}")
+
+        except Exception as e:
+            if debug:
+                print(f"  [DEBUG] Error querying {hotkey[:12]}...: {e}")
             continue
 
     print(f"Found {len(commitments)} commitments\n")
@@ -355,7 +339,7 @@ def main():
 
     commitments = {}
     if not args.skip_commitments:
-        commitments = query_commitments(sub, meta)
+        commitments = query_commitments(sub, meta, debug=args.debug)
 
     display_leaderboard(
         meta, commitments,
