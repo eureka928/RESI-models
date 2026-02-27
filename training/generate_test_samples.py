@@ -285,7 +285,7 @@ def find_validator_failure_cases(
     def _pick(mask_or_idx, label: str, n: int = 8):
         """Pick up to n samples from mask, respecting exclusions."""
         nonlocal selected
-        if isinstance(mask_or_idx, pd.Series):
+        if isinstance(mask_or_idx, (pd.Series, np.ndarray)):
             candidates = df[mask_or_idx].index.tolist()
         else:
             candidates = list(mask_or_idx)
