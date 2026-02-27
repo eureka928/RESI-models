@@ -265,8 +265,8 @@ def generate_oof_predictions(
         oof_preds[val_idx, 0] = m1.predict(X_vl)
         models["m1"] = m1
 
-        # m2: LightGBM regularized
-        m2 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M2, feature_names, f"m2_fold{fold_idx}", sample_weight=sw_tr)
+        # m2: LightGBM regularized (MAPE obj already weights by 1/price — no sample_weight)
+        m2 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M2, feature_names, f"m2_fold{fold_idx}")
         oof_preds[val_idx, 1] = m2.predict(X_vl)
         models["m2"] = m2
 
@@ -275,8 +275,8 @@ def generate_oof_predictions(
         oof_preds[val_idx, 2] = m3.predict(X_vl)
         models["m3"] = m3
 
-        # m4: CatBoost
-        m4 = train_catboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M4, feature_names, f"m4_fold{fold_idx}", sample_weight=sw_tr)
+        # m4: CatBoost (MAPE obj already weights by 1/price — no sample_weight)
+        m4 = train_catboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M4, feature_names, f"m4_fold{fold_idx}")
         oof_preds[val_idx, 3] = m4.predict(X_vl)
         models["m4"] = m4
 
@@ -329,9 +329,9 @@ def train_final_models(
 
     models = {}
     models["m1"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M1, feature_names, "m1_final", sample_weight=sample_weight)
-    models["m2"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M2, feature_names, "m2_final", sample_weight=sample_weight)
+    models["m2"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M2, feature_names, "m2_final")  # MAPE obj — no sample_weight
     models["m3"] = train_xgboost(X_train, y_train, X_val, y_val, PARAMS_M3, feature_names, "m3_final", sample_weight=sample_weight)
-    models["m4"] = train_catboost(X_train, y_train, X_val, y_val, PARAMS_M4, feature_names, "m4_final", sample_weight=sample_weight)
+    models["m4"] = train_catboost(X_train, y_train, X_val, y_val, PARAMS_M4, feature_names, "m4_final")  # MAPE obj — no sample_weight
     models["m5"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M5, feature_names, "m5_final", sample_weight=sample_weight)
 
     return models
