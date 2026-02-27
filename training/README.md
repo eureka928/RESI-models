@@ -25,6 +25,58 @@ python run_pipeline.py --search-pages 50 --detail-budget 7500
 python run_pipeline.py --legacy-collect --rapidapi-key YOUR_KEY
 ```
 
+## Command Reference
+
+### Setup
+
+| Command | Description |
+|---------|-------------|
+| `pip install -r requirements.txt` | Install all training dependencies |
+| `cp .env.example .env` | Create env file for API keys |
+
+### Data Collection
+
+| Command | Description |
+|---------|-------------|
+| `python collect_geo_data.py` | Download free geo data (ZHVI, Census, Redfin) and build 34 surface .npy files |
+| `python collect_schools.py` | Download NCES public school data (~100K schools) and build KD-tree |
+| `python collect_data.py --mode search --search-pages 50` | Search-only: ~100K property summaries (2,500 API calls) |
+| `python collect_data.py --mode detail --detail-budget 7500` | Detail collection: full features for 7,500 properties |
+| `python feature_engineer.py` | Transform raw JSON + search data into 79-feature Parquet dataset |
+
+### Training & Export
+
+| Command | Description |
+|---------|-------------|
+| `python train_model.py --dataset dataset.parquet --geo-dir geo_surfaces` | Train 5-model stacking ensemble with RidgeCV meta-learner |
+| `python train_model.py --dataset dataset.parquet --skip-geo` | Train without geographic features |
+| `python export_onnx.py` | Export trained models to single ONNX file with baked-in geo lookups |
+
+### Evaluation & Submission
+
+| Command | Description |
+|---------|-------------|
+| `uv run miner-cli evaluate --model.path model.onnx` | Evaluate model against validator's daily data (from project root) |
+| `ls -lh model.onnx` | Check model size (must be < 200 MB) |
+| `uv run miner-cli submit --model.path model.onnx --hf.repo_id user/repo --wallet.name miner` | Submit model commitment on-chain |
+
+### End-to-End Pipeline
+
+| Command | Description |
+|---------|-------------|
+| `python run_pipeline.py` | Full pipeline: collect data + train + export (~$25 API cost) |
+| `python run_pipeline.py --skip-collect --skip-geo --skip-schools` | Retrain + export only (skip data collection) |
+| `python run_pipeline.py --search-pages 50 --detail-budget 7500` | Custom API budget split |
+
+### Monitoring & Leaderboard
+
+| Command | Description |
+|---------|-------------|
+| `python query_leaderboard.py` | Full subnet 46 leaderboard with all submissions |
+| `python query_leaderboard.py --top 20` | Show top 20 neurons only |
+| `python query_leaderboard.py --miners-only` | Show only miners (exclude validators) |
+| `python query_leaderboard.py --skip-commitments` | Fast mode: rankings only, skip HF repo details |
+
 ## Architecture
 
 The pipeline produces a model that surpasses the current top competitor's 2-model LightGBM approach:

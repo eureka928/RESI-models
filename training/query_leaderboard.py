@@ -25,9 +25,20 @@ def query_metagraph(network: str = "finney"):
         sys.exit(1)
 
     print(f"Connecting to {network} network...")
-    sub = bt.subtensor(network=network)
+
+    # Handle both old (bt.subtensor) and new (bt.Subtensor) SDK versions
+    subtensor_cls = getattr(bt, "Subtensor", None) or getattr(bt, "subtensor")
+    metagraph_cls = getattr(bt, "Metagraph", None) or getattr(bt, "metagraph")
+
+    sub = subtensor_cls(network=network)
     print(f"Fetching metagraph for subnet {NETUID}...")
-    meta = bt.metagraph(netuid=NETUID, network=network, sync=True)
+
+    # Try new SDK signature first, fall back to old
+    try:
+        meta = metagraph_cls(netuid=NETUID, network=network, sync=True)
+    except TypeError:
+        meta = metagraph_cls(netuid=NETUID)
+        meta.sync(subtensor=sub)
 
     return sub, meta
 
@@ -42,7 +53,12 @@ def query_commitments(sub, meta):
         if i % 50 == 0 and i > 0:
             print(f"  ...checked {i}/{len(hotkeys)} neurons")
         try:
-            result = sub.query_module(
+            # Try different SDK method names for querying chain storage
+            query_fn = getattr(sub, "query_module", None) or getattr(sub, "query", None)
+            if query_fn is None:
+                print("  WARNING: Cannot query commitments — SDK missing query_module/query method")
+                break
+            result = query_fn(
                 module="Commitments",
                 name="CommitmentOf",
                 params=[NETUID, hotkey],
