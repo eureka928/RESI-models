@@ -77,6 +77,55 @@ def query_metagraph(network: str = "finney"):
     return sub, meta
 
 
+def _parse_raw_commitment(raw: dict) -> dict | None:
+    """Parse a raw commitment dict from substrate query.
+
+    The data is stored as: {'deposit': N, 'block': N, 'info': {'fields': (({'RawN': (bytes...)},),)}}
+    The RawN value is a tuple of integers (ASCII byte values), not hex.
+    """
+    block = raw.get("block", 0)
+    info = raw.get("info", {})
+    fields = info.get("fields", ())
+
+    # Extract byte tuple from nested structure
+    byte_data = None
+    if isinstance(fields, (list, tuple)):
+        for field in fields:
+            if isinstance(field, (list, tuple)):
+                for item in field:
+                    if isinstance(item, dict):
+                        for key, val in item.items():
+                            if key.startswith("Raw") and val:
+                                # val is a tuple of ints or nested tuple
+                                if isinstance(val, (list, tuple)):
+                                    # May be ((bytes...),) or (bytes...)
+                                    flat = val[0] if len(val) == 1 and isinstance(val[0], (list, tuple)) else val
+                                    byte_data = bytes(flat)
+                                break
+            elif isinstance(field, dict):
+                for key, val in field.items():
+                    if key.startswith("Raw") and val:
+                        if isinstance(val, (list, tuple)):
+                            flat = val[0] if len(val) == 1 and isinstance(val[0], (list, tuple)) else val
+                            byte_data = bytes(flat)
+                        break
+            if byte_data:
+                break
+
+    if not byte_data:
+        return None
+
+    try:
+        data = json.loads(byte_data.decode("utf-8"))
+        return {
+            "hf_repo_id": data.get("r", ""),
+            "model_hash": data.get("h", ""),
+            "block": block,
+        }
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"hf_repo_id": "?", "model_hash": "?", "block": block}
+
+
 def query_commitments(sub, meta):
     """Query on-chain commitments for all neurons."""
     commitments = {}
@@ -84,64 +133,58 @@ def query_commitments(sub, meta):
 
     print(f"Fetching commitments for {len(hotkeys)} neurons...")
 
-    # Get substrate interface for direct RPC queries
-    substrate = getattr(sub, "substrate", None)
-    if substrate is None:
-        print("  WARNING: Cannot access substrate interface — skipping commitments")
-        return commitments
+    # Method 1: Try SDK built-in get_commitment() (bittensor >= 10.x)
+    get_commitment_fn = getattr(sub, "get_commitment", None)
 
     for i, hotkey in enumerate(hotkeys):
         if i % 50 == 0 and i > 0:
             print(f"  ...checked {i}/{len(hotkeys)} neurons")
         try:
-            # Direct substrate query for commitment storage
-            result = substrate.query(
-                module="Commitments",
-                storage_function="CommitmentOf",
-                params=[NETUID, hotkey],
-            )
-            if result is None:
-                continue
+            if get_commitment_fn:
+                result = get_commitment_fn(netuid=NETUID, hotkey=hotkey)
+                if result:
+                    # SDK may return parsed data or raw dict
+                    if isinstance(result, dict):
+                        if "r" in result:
+                            commitments[hotkey] = {
+                                "hf_repo_id": result.get("r", ""),
+                                "model_hash": result.get("h", ""),
+                                "block": result.get("block", 0),
+                            }
+                        else:
+                            parsed = _parse_raw_commitment(result)
+                            if parsed:
+                                commitments[hotkey] = parsed
+                    elif isinstance(result, str):
+                        # May return JSON string
+                        try:
+                            data = json.loads(result)
+                            commitments[hotkey] = {
+                                "hf_repo_id": data.get("r", ""),
+                                "model_hash": data.get("h", ""),
+                                "block": data.get("block", 0),
+                            }
+                        except json.JSONDecodeError:
+                            pass
+                    continue
 
-            raw = result.value if hasattr(result, "value") else result
-            if not raw or raw == {"info": {"fields": [{"None": None}]}, "block": 0}:
-                continue
+            # Method 2: Raw substrate query fallback
+            substrate = getattr(sub, "substrate", None)
+            if substrate:
+                result = substrate.query(
+                    module="Commitments",
+                    storage_function="CommitmentOf",
+                    params=[NETUID, hotkey],
+                )
+                if result is None:
+                    continue
+                raw = result.value if hasattr(result, "value") else result
+                if not raw or raw.get("block", 0) == 0:
+                    continue
+                parsed = _parse_raw_commitment(raw)
+                if parsed:
+                    commitments[hotkey] = parsed
 
-            # Parse the commitment structure
-            hex_data = None
-            block = 0
-
-            if isinstance(raw, dict):
-                block = raw.get("block", 0)
-                info = raw.get("info", {})
-                fields = info.get("fields", [])
-                for field in fields:
-                    if isinstance(field, dict):
-                        for key, val in field.items():
-                            if val and key != "None":
-                                hex_data = str(val)
-                                break
-                    elif isinstance(field, str) and len(field) > 10:
-                        hex_data = field
-                    if hex_data:
-                        break
-
-            if hex_data:
-                try:
-                    hex_str = hex_data[2:] if hex_data.startswith("0x") else hex_data
-                    decoded = bytes.fromhex(hex_str).decode("utf-8")
-                    data = json.loads(decoded)
-                    commitments[hotkey] = {
-                        "hf_repo_id": data.get("r", ""),
-                        "model_hash": data.get("h", ""),
-                        "block": block,
-                    }
-                except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-                    commitments[hotkey] = {
-                        "hf_repo_id": "?",
-                        "model_hash": "?",
-                        "block": block,
-                    }
         except Exception:
             continue
 
