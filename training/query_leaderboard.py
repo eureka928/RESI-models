@@ -16,6 +16,22 @@ from datetime import datetime, timezone
 NETUID = 46
 
 
+def _get_meta_array(meta, *names):
+    """Get a metagraph attribute by trying multiple names (handles SDK version diffs).
+
+    New SDK uses short names (S, I, D, E, C, T), old uses long names
+    (stake, incentive, dividends, emission, consensus, trust).
+    """
+    for name in names:
+        val = getattr(meta, name, None)
+        if val is not None:
+            return val
+    # Return zeros if nothing found
+    import numpy as np
+    n = meta.n.item() if hasattr(meta.n, "item") else int(meta.n)
+    return np.zeros(n)
+
+
 def query_metagraph(network: str = "finney"):
     """Query metagraph using bittensor SDK."""
     try:
@@ -28,17 +44,35 @@ def query_metagraph(network: str = "finney"):
 
     # Handle both old (bt.subtensor) and new (bt.Subtensor) SDK versions
     subtensor_cls = getattr(bt, "Subtensor", None) or getattr(bt, "subtensor")
-    metagraph_cls = getattr(bt, "Metagraph", None) or getattr(bt, "metagraph")
-
     sub = subtensor_cls(network=network)
     print(f"Fetching metagraph for subnet {NETUID}...")
 
-    # Try new SDK signature first, fall back to old
-    try:
-        meta = metagraph_cls(netuid=NETUID, network=network, sync=True)
-    except TypeError:
-        meta = metagraph_cls(netuid=NETUID)
-        meta.sync(subtensor=sub)
+    # Try multiple ways to get metagraph
+    meta = None
+
+    # Method 1: sub.metagraph() (newer SDK)
+    if meta is None:
+        try:
+            meta = sub.metagraph(netuid=NETUID)
+        except (AttributeError, TypeError):
+            pass
+
+    # Method 2: bt.Metagraph / bt.metagraph class
+    if meta is None:
+        metagraph_cls = getattr(bt, "Metagraph", None) or getattr(bt, "metagraph", None)
+        if metagraph_cls:
+            try:
+                meta = metagraph_cls(netuid=NETUID, network=network, sync=True)
+            except TypeError:
+                try:
+                    meta = metagraph_cls(netuid=NETUID)
+                    meta.sync(subtensor=sub)
+                except Exception:
+                    pass
+
+    if meta is None:
+        print("ERROR: Could not fetch metagraph. Check bittensor SDK version.")
+        sys.exit(1)
 
     return sub, meta
 
@@ -46,57 +80,68 @@ def query_metagraph(network: str = "finney"):
 def query_commitments(sub, meta):
     """Query on-chain commitments for all neurons."""
     commitments = {}
-    hotkeys = meta.hotkeys
+    hotkeys = list(meta.hotkeys)
 
     print(f"Fetching commitments for {len(hotkeys)} neurons...")
+
+    # Get substrate interface for direct RPC queries
+    substrate = getattr(sub, "substrate", None)
+    if substrate is None:
+        print("  WARNING: Cannot access substrate interface — skipping commitments")
+        return commitments
+
     for i, hotkey in enumerate(hotkeys):
         if i % 50 == 0 and i > 0:
             print(f"  ...checked {i}/{len(hotkeys)} neurons")
         try:
-            # Try different SDK method names for querying chain storage
-            query_fn = getattr(sub, "query_module", None) or getattr(sub, "query", None)
-            if query_fn is None:
-                print("  WARNING: Cannot query commitments — SDK missing query_module/query method")
-                break
-            result = query_fn(
+            # Direct substrate query for commitment storage
+            result = substrate.query(
                 module="Commitments",
-                name="CommitmentOf",
+                storage_function="CommitmentOf",
                 params=[NETUID, hotkey],
             )
-            if result and hasattr(result, "value") and result.value:
-                raw = result.value
-                # Commitment is stored as {"info": {"fields": [{"Raw<N>": hex_data}]}, "block": N}
-                info = raw.get("info", {})
-                block = raw.get("block", 0)
-                fields = info.get("fields", [])
+            if result is None:
+                continue
 
-                hex_data = None
+            raw = result.value if hasattr(result, "value") else result
+            if not raw or raw == {"info": {"fields": [{"None": None}]}, "block": 0}:
+                continue
+
+            # Parse the commitment structure
+            hex_data = None
+            block = 0
+
+            if isinstance(raw, dict):
+                block = raw.get("block", 0)
+                info = raw.get("info", {})
+                fields = info.get("fields", [])
                 for field in fields:
                     if isinstance(field, dict):
                         for key, val in field.items():
-                            if key.startswith("Raw") and val:
-                                hex_data = val
+                            if val and key != "None":
+                                hex_data = str(val)
                                 break
+                    elif isinstance(field, str) and len(field) > 10:
+                        hex_data = field
                     if hex_data:
                         break
 
-                if hex_data:
-                    try:
-                        hex_str = hex_data[2:] if hex_data.startswith("0x") else hex_data
-                        decoded = bytes.fromhex(hex_str).decode("utf-8")
-                        data = json.loads(decoded)
-                        commitments[hotkey] = {
-                            "hf_repo_id": data.get("r", ""),
-                            "model_hash": data.get("h", ""),
-                            "block": block,
-                        }
-                    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-                        commitments[hotkey] = {
-                            "hf_repo_id": "?",
-                            "model_hash": "?",
-                            "block": block,
-                            "raw": hex_data[:40] + "...",
-                        }
+            if hex_data:
+                try:
+                    hex_str = hex_data[2:] if hex_data.startswith("0x") else hex_data
+                    decoded = bytes.fromhex(hex_str).decode("utf-8")
+                    data = json.loads(decoded)
+                    commitments[hotkey] = {
+                        "hf_repo_id": data.get("r", ""),
+                        "model_hash": data.get("h", ""),
+                        "block": block,
+                    }
+                except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                    commitments[hotkey] = {
+                        "hf_repo_id": "?",
+                        "model_hash": "?",
+                        "block": block,
+                    }
         except Exception:
             continue
 
@@ -108,17 +153,25 @@ def display_leaderboard(meta, commitments, top_n=None, miners_only=False):
     """Display formatted leaderboard."""
     n = meta.n.item() if hasattr(meta.n, "item") else int(meta.n)
 
+    # Get arrays — handle both old (long names) and new (short names) SDK
+    stakes = _get_meta_array(meta, "stake", "S", "total_stake")
+    trusts = _get_meta_array(meta, "trust", "T")
+    consensuses = _get_meta_array(meta, "consensus", "C")
+    incentives = _get_meta_array(meta, "incentive", "I")
+    dividendses = _get_meta_array(meta, "dividends", "D")
+    emissions = _get_meta_array(meta, "emission", "E")
+
     # Build rows
     rows = []
     for i in range(n):
         uid = int(meta.uids[i])
         hotkey = meta.hotkeys[i]
-        stake = float(meta.stake[i])
-        trust = float(meta.trust[i])
-        consensus = float(meta.consensus[i])
-        incentive = float(meta.incentive[i])
-        dividends = float(meta.dividends[i])
-        emission = float(meta.emission[i])
+        stake = float(stakes[i])
+        trust = float(trusts[i])
+        consensus = float(consensuses[i])
+        incentive = float(incentives[i])
+        dividends = float(dividendses[i])
+        emission = float(emissions[i])
         is_validator = dividends > 0 or stake > 1000
 
         if miners_only and is_validator:
@@ -205,24 +258,24 @@ def display_leaderboard(meta, commitments, top_n=None, miners_only=False):
             )
 
     # Summary stats
-    miners = [r for r in rows if not r["is_validator"]]
-    validators = [r for r in rows if r["is_validator"]]
+    all_rows = rows  # already filtered by miners_only if needed
+    miners = [r for r in all_rows if not r["is_validator"]]
+    validators = [r for r in all_rows if r["is_validator"]]
     active_miners = [r for r in miners if r["incentive"] > 0]
     with_submissions = [r for r in miners if r["commitment"]]
 
     print(f"\n{'=' * 120}")
     print(f"  Summary")
     print(f"{'=' * 120}")
-    print(f"  Total neurons:          {len(rows)}")
+    print(f"  Total neurons:          {n}")
     print(f"  Validators:             {len(validators)}")
     print(f"  Miners:                 {len(miners)}")
     print(f"  Miners with incentive:  {len(active_miners)}")
     print(f"  Miners with submission: {len(with_submissions)}")
     if active_miners:
-        top = active_miners[0] if miners else None
-        if top:
-            hf = top["commitment"].get("hf_repo_id", "?") if top["commitment"] else "?"
-            print(f"  Current winner:         UID {top['uid']} — {hf} (incentive: {top['incentive']:.6f})")
+        top = active_miners[0]
+        hf = top["commitment"].get("hf_repo_id", "?") if top["commitment"] else "?"
+        print(f"  Current winner:         UID {top['uid']} — {hf} (incentive: {top['incentive']:.6f})")
     print()
 
 
@@ -244,9 +297,18 @@ def main():
         "--skip-commitments", action="store_true",
         help="Skip fetching commitments (faster, no HF repo info)",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Print debug info about SDK attributes",
+    )
     args = parser.parse_args()
 
     sub, meta = query_metagraph(args.network)
+
+    if args.debug:
+        print(f"\n[DEBUG] Metagraph attributes: {[a for a in dir(meta) if not a.startswith('_')]}")
+        print(f"[DEBUG] Subtensor attributes: {[a for a in dir(sub) if not a.startswith('_')]}")
+        print(f"[DEBUG] Has substrate: {hasattr(sub, 'substrate')}\n")
 
     commitments = {}
     if not args.skip_commitments:
