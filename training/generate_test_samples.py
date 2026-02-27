@@ -323,7 +323,7 @@ def generate_test_samples(
     model_path: Path = DEFAULT_MODEL,
     num_realistic: int = 600,
     num_error: int = 100,
-    num_challenge: int = 200,
+    num_challenge: int = 300,
     output_path: Path = OUTPUT_PATH,
     seed: int = 42,
 ):
@@ -438,7 +438,7 @@ def main():
         help="Number of model error cases (worst predictions)",
     )
     parser.add_argument(
-        "--num-challenge", type=int, default=200,
+        "--num-challenge", type=int, default=300,
         help="Number of challenging but realistic cases",
     )
     parser.add_argument(
