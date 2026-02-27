@@ -77,7 +77,7 @@ def convert_lgbm_to_onnx(model, n_features: int, name: str) -> onnx.ModelProto:
     # The tree structure is identical; only the loss function differs during training
     booster = model.booster_
     model_str = booster.model_to_string()
-    for obj_name in ["mape", "regression_l1"]:
+    for obj_name in ["mape", "regression_l1", "huber"]:
         model_str = model_str.replace(
             f"objective={obj_name}", "objective=regression"
         )
@@ -213,11 +213,14 @@ def build_ensemble_graph(
     meta_intercept: float,
     geo_surfaces: dict | None,
     n_base_features: int = 79,
+    m5_onnx: onnx.ModelProto | None = None,
 ) -> onnx.ModelProto:
     """Build the complete ONNX graph."""
     nodes = []
     initializers = []
     value_infos = []
+
+    num_models = len(meta_coef)
 
     input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [None, n_base_features])
 
@@ -234,28 +237,34 @@ def build_ensemble_graph(
         tree_input = "input"
 
     # Extract tree ensemble nodes from each model
+    model_names = ["m1", "m2", "m3", "m4"]
     nodes.append(extract_tree_node(m1_onnx, tree_input, "m1_raw"))
     nodes.append(extract_tree_node(m2_onnx, tree_input, "m2_raw"))
     nodes.append(extract_tree_node(m3_onnx, tree_input, "m3_raw"))
     nodes.append(extract_tree_node(m4_onnx, tree_input, "m4_raw"))
 
+    if m5_onnx is not None:
+        nodes.append(extract_tree_node(m5_onnx, tree_input, "m5_raw"))
+        model_names.append("m5")
+
     # Reshape all to (batch, 1)
     initializers.append(numpy_helper.from_array(np.array([-1, 1], dtype=np.int64), name="reshape_shape"))
-    for name in ["m1", "m2", "m3", "m4"]:
+    for name in model_names:
         nodes.append(helper.make_node("Reshape", [f"{name}_raw", "reshape_shape"], [f"{name}_pred"]))
 
-    # Stack to (batch, 4)
-    nodes.append(helper.make_node("Concat", ["m1_pred", "m2_pred", "m3_pred", "m4_pred"], ["base_preds"], axis=1))
+    # Stack to (batch, N)
+    pred_names = [f"{name}_pred" for name in model_names]
+    nodes.append(helper.make_node("Concat", pred_names, ["base_preds"], axis=1))
 
     # Meta-learner: output = base_preds @ coef + intercept
     initializers.append(
-        numpy_helper.from_array(meta_coef.astype(np.float32).reshape(4, 1), name="meta_coef")
+        numpy_helper.from_array(meta_coef.astype(np.float32).reshape(num_models, 1), name="meta_coef")
     )
     initializers.append(
         numpy_helper.from_array(np.array([[meta_intercept]], dtype=np.float32), name="meta_intercept")
     )
 
-    # MatMul: (batch, 4) @ (4, 1) -> (batch, 1)
+    # MatMul: (batch, N) @ (N, 1) -> (batch, 1)
     nodes.append(helper.make_node("MatMul", ["base_preds", "meta_coef"], ["meta_prod"]))
     nodes.append(helper.make_node("Add", ["meta_prod", "meta_intercept"], ["log_pred"]))
 
@@ -339,10 +348,7 @@ def validate_onnx_model(
         augmented = test_input
 
     base_preds = np.column_stack([
-        models["m1"].predict(augmented),
-        models["m2"].predict(augmented),
-        models["m3"].predict(augmented),
-        models["m4"].predict(augmented),
+        models[name].predict(augmented) for name in sorted(models.keys())
     ])
     meta_pred = meta.predict(base_preds)
     python_preds = np.clip(np.expm1(meta_pred), MIN_PRICE, MAX_PRICE)
@@ -386,7 +392,7 @@ def export_onnx(
     # Load trained models
     logger.info("Loading trained models...")
     models = {}
-    for name in ["m1", "m2", "m3", "m4"]:
+    for name in ["m1", "m2", "m3", "m4", "m5"]:
         with open(model_dir / f"{name}.pkl", "rb") as f:
             models[name] = pickle.load(f)
 
@@ -426,12 +432,16 @@ def export_onnx(
     tmp_cb_path = str(model_dir / "m4_temp.onnx")
     m4_onnx = convert_catboost_to_onnx(models["m4"], n_features, tmp_cb_path)
 
+    logger.info("Converting m5 (LightGBM Huber) to ONNX...")
+    m5_onnx = convert_lgbm_to_onnx(models["m5"], n_features, "m5")
+
     # Build combined graph
     logger.info("Building stacking ensemble ONNX graph...")
     combined_model = build_ensemble_graph(
         m1_onnx, m2_onnx, m3_onnx, m4_onnx,
         meta_coef, meta_intercept,
         geo_surfaces, n_base_features=79,
+        m5_onnx=m5_onnx,
     )
 
     # Save

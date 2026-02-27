@@ -195,6 +195,11 @@ TARGET_MARKETS = [
     "Virginia Beach, VA", "Honolulu, HI", "Newark, NJ",
     "Bridgeport, CT", "Providence, RI", "Hartford, CT",
     "Wilmington, DE", "Charleston, SC", "Savannah, GA",
+    # Rural/small markets for geographic coverage
+    "Sioux Falls, SD", "Burlington, VT", "Fargo, ND",
+    "Bangor, ME", "Grand Junction, CO", "Duluth, MN",
+    "Augusta, GA", "Macon, GA", "Albany, GA",
+    "Conway, AR", "Hot Springs, AR",
 ]
 
 # --- LightGBM Hyperparameters ---
@@ -226,6 +231,8 @@ PARAMS_M1 = {
     "bagging_freq": 5,
     "min_child_samples": 20,
     "n_estimators": 3000,
+    "lambda_l1": 0.5,
+    "lambda_l2": 1.0,
     "verbose": -1,
 }
 
@@ -240,6 +247,8 @@ PARAMS_M2 = {
     "bagging_freq": 3,
     "min_child_samples": 30,
     "n_estimators": 2500,
+    "lambda_l1": 0.5,
+    "lambda_l2": 1.0,
     "verbose": -1,
 }
 
@@ -255,6 +264,8 @@ PARAMS_M3 = {
     "colsample_bytree": 0.8,
     "min_child_weight": 20,
     "n_estimators": 2500,
+    "reg_alpha": 0.5,
+    "reg_lambda": 1.0,
     "verbosity": 0,
 }
 
@@ -266,16 +277,34 @@ PARAMS_M4 = {
     "depth": 6,
     "learning_rate": 0.03,
     "iterations": 2000,
-    "l2_leaf_reg": 3.0,
+    "l2_leaf_reg": 5.0,
     "subsample": 0.8,
     "random_strength": 1.0,
     "verbose": 0,
 }
 
+# --- LightGBM Huber Loss (outlier-robust) ---
+
+PARAMS_M5 = {
+    "objective": "huber",          # robust to outliers — reduces tail risk
+    "metric": "mape",
+    "boosting_type": "gbdt",
+    "num_leaves": 95,              # fewer leaves than m1 for diversity
+    "learning_rate": 0.025,
+    "feature_fraction": 0.7,
+    "bagging_fraction": 0.75,
+    "bagging_freq": 3,
+    "min_child_samples": 30,
+    "n_estimators": 2500,
+    "lambda_l1": 1.0,
+    "lambda_l2": 2.0,
+    "verbose": -1,
+}
+
 # --- Ensemble Configuration ---
 
 # Number of base models in the stacking ensemble
-NUM_BASE_MODELS = 4  # m1 (lgbm), m2 (lgbm), m3 (xgb), m4 (catboost)
+NUM_BASE_MODELS = 5  # m1 (lgbm), m2 (lgbm), m3 (xgb), m4 (catboost), m5 (lgbm-huber)
 
 # --- Home Type Mapping ---
 

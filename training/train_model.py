@@ -1,14 +1,15 @@
 """
-Train a 4-model stacking ensemble for RESI price prediction.
+Train a 5-model stacking ensemble for RESI price prediction.
 
 Architecture (beats top model's 2-LightGBM approach):
   Level 0 (base models):
-    - m1: LightGBM (255 leaves, MAE obj) — high capacity, correct MAPE proxy
-    - m2: LightGBM (127 leaves, MAPE obj) — regularized, diversity
-    - m3: XGBoost  (depth 8, MAE obj)     — different inductive bias
-    - m4: CatBoost (depth 8, MAPE obj)    — ordered boosting, diversity
+    - m1: LightGBM (127 leaves, MAE obj) — high capacity, correct MAPE proxy
+    - m2: LightGBM (63 leaves, MAPE obj) — regularized, diversity
+    - m3: XGBoost  (depth 6, MAE obj)    — different inductive bias
+    - m4: CatBoost (depth 6, MAPE obj)   — ordered boosting, diversity
+    - m5: LightGBM (127 leaves, Huber)   — outlier-robust, reduces tail risk
   Level 1 (meta-learner):
-    - Ridge regression on out-of-fold predictions → optimal blending weights
+    - RidgeCV on out-of-fold predictions → optimal blending weights
 
 All predict in log1p(price) space. Final: expm1(meta_pred), clipped to [$50K, $20M].
 
@@ -33,7 +34,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import KFold
 
 from config import (
@@ -45,6 +46,7 @@ from config import (
     PARAMS_M2,
     PARAMS_M3,
     PARAMS_M4,
+    PARAMS_M5,
 )
 from geo_features import GeoFeatureLookup
 
@@ -79,6 +81,26 @@ def load_and_prepare_data(
     df = pd.read_parquet(dataset_path)
     logger.info(f"Loaded {len(df)} samples with {len(df.columns)} columns")
 
+    # Outlier filtering: remove obviously bad data points
+    n_before = len(df)
+    living_area = df["living_area_sqft"]
+    price = df["price"]
+    price_per_sqft = price / living_area.replace(0, np.nan)
+
+    bad_mask = (
+        (price_per_sqft.notna() & ((price_per_sqft < 25) | (price_per_sqft > 1500)))
+        | ((living_area > 0) & ((living_area < 300) | (living_area > 15000)))
+        | (
+            (df["bedrooms"] == 0)
+            & (df["bathrooms"] == 0)
+            & (living_area == 0)
+        )
+    )
+    df = df[~bad_mask].reset_index(drop=True)
+    n_removed = n_before - len(df)
+    if n_removed > 0:
+        logger.info(f"Outlier filtering: removed {n_removed} bad samples ({n_removed/n_before:.1%})")
+
     # Target: log1p(price)
     y = np.log1p(df["price"].values)
 
@@ -106,6 +128,13 @@ def load_and_prepare_data(
     X_train, X_val = X[train_idx], X[val_idx]
     y_train, y_val = y[train_idx], y[val_idx]
 
+    # Compute sample weights: gentle inverse-price weighting (~2:1 cheap vs expensive)
+    # Power=0.25 gives gentler ratio than sqrt (power=0.5) since validator scores
+    # all properties equally by MAPE
+    train_prices = np.expm1(y_train)
+    sample_weight = 1.0 / np.power(np.maximum(train_prices, 1.0), 0.25)
+    sample_weight = sample_weight / sample_weight.mean()  # normalize to mean=1
+
     logger.info(f"Train: {len(X_train)} samples, Val: {len(X_val)} samples")
     logger.info(
         f"Train price range: ${np.expm1(y_train.min()):,.0f} - ${np.expm1(y_train.max()):,.0f}"
@@ -113,14 +142,18 @@ def load_and_prepare_data(
     logger.info(
         f"Val price range: ${np.expm1(y_val.min()):,.0f} - ${np.expm1(y_val.max()):,.0f}"
     )
+    logger.info(
+        f"Sample weight range: {sample_weight.min():.3f} - {sample_weight.max():.3f}"
+    )
 
-    return X_train, y_train, X_val, y_val, feature_names, geo_lookup
+    return X_train, y_train, X_val, y_val, feature_names, geo_lookup, sample_weight
 
 
 def train_lgbm(
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     params: dict, feature_names: list[str], name: str,
+    sample_weight: np.ndarray | None = None,
 ) -> lgb.LGBMRegressor:
     """Train a single LightGBM model."""
     logger.info(f"Training {name} (LightGBM)...")
@@ -130,6 +163,7 @@ def train_lgbm(
     model = lgb.LGBMRegressor(n_estimators=n_estimators, **fit_params)
     model.fit(
         X_train, y_train,
+        sample_weight=sample_weight,
         eval_set=[(X_val, y_val)],
         eval_metric="mape",
         callbacks=[
@@ -148,6 +182,7 @@ def train_xgboost(
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     params: dict, feature_names: list[str], name: str,
+    sample_weight: np.ndarray | None = None,
 ) -> xgb.XGBRegressor:
     """Train a single XGBoost model."""
     logger.info(f"Training {name} (XGBoost)...")
@@ -162,6 +197,7 @@ def train_xgboost(
     )
     model.fit(
         X_train, y_train,
+        sample_weight=sample_weight,
         eval_set=[(X_val, y_val)],
         verbose=200,
     )
@@ -175,6 +211,7 @@ def train_catboost(
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     params: dict, feature_names: list[str], name: str,
+    sample_weight: np.ndarray | None = None,
 ) -> cb.CatBoostRegressor:
     """Train a single CatBoost model."""
     logger.info(f"Training {name} (CatBoost)...")
@@ -184,7 +221,7 @@ def train_catboost(
         random_seed=42,
         **fit_params,
     )
-    pool_train = cb.Pool(X_train, y_train, feature_names=feature_names)
+    pool_train = cb.Pool(X_train, y_train, feature_names=feature_names, weight=sample_weight)
     pool_val = cb.Pool(X_val, y_val, feature_names=feature_names)
     model.fit(
         pool_train,
@@ -199,13 +236,14 @@ def train_catboost(
 
 def generate_oof_predictions(
     X_train: np.ndarray, y_train: np.ndarray,
-    feature_names: list[str], n_folds: int = 5,
+    feature_names: list[str], sample_weight: np.ndarray | None = None,
+    n_folds: int = 5,
 ) -> tuple[np.ndarray, list]:
     """
     Generate out-of-fold predictions for stacking.
 
     Trains each base model on k-1 folds and predicts the held-out fold.
-    Returns (oof_preds of shape (n_train, 4), list of trained models per fold).
+    Returns (oof_preds of shape (n_train, NUM_BASE_MODELS), list of trained models per fold).
     """
     logger.info(f"\nGenerating out-of-fold predictions ({n_folds} folds)...")
     n = len(X_train)
@@ -218,33 +256,39 @@ def generate_oof_predictions(
         logger.info(f"\n--- Fold {fold_idx + 1}/{n_folds} ---")
         X_tr, X_vl = X_train[train_idx], X_train[val_idx]
         y_tr, y_vl = y_train[train_idx], y_train[val_idx]
+        sw_tr = sample_weight[train_idx] if sample_weight is not None else None
 
         models = {}
 
         # m1: LightGBM high-capacity
-        m1 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M1, feature_names, f"m1_fold{fold_idx}")
+        m1 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M1, feature_names, f"m1_fold{fold_idx}", sample_weight=sw_tr)
         oof_preds[val_idx, 0] = m1.predict(X_vl)
         models["m1"] = m1
 
         # m2: LightGBM regularized
-        m2 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M2, feature_names, f"m2_fold{fold_idx}")
+        m2 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M2, feature_names, f"m2_fold{fold_idx}", sample_weight=sw_tr)
         oof_preds[val_idx, 1] = m2.predict(X_vl)
         models["m2"] = m2
 
         # m3: XGBoost
-        m3 = train_xgboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M3, feature_names, f"m3_fold{fold_idx}")
+        m3 = train_xgboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M3, feature_names, f"m3_fold{fold_idx}", sample_weight=sw_tr)
         oof_preds[val_idx, 2] = m3.predict(X_vl)
         models["m3"] = m3
 
         # m4: CatBoost
-        m4 = train_catboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M4, feature_names, f"m4_fold{fold_idx}")
+        m4 = train_catboost(X_tr, y_tr, X_vl, y_vl, PARAMS_M4, feature_names, f"m4_fold{fold_idx}", sample_weight=sw_tr)
         oof_preds[val_idx, 3] = m4.predict(X_vl)
         models["m4"] = m4
+
+        # m5: LightGBM with Huber loss (outlier-robust)
+        m5 = train_lgbm(X_tr, y_tr, X_vl, y_vl, PARAMS_M5, feature_names, f"m5_fold{fold_idx}", sample_weight=sw_tr)
+        oof_preds[val_idx, 4] = m5.predict(X_vl)
+        models["m5"] = m5
 
         fold_models.append(models)
 
     # Report OOF performance per model
-    for i, name in enumerate(["m1(lgbm)", "m2(lgbm)", "m3(xgb)", "m4(cat)"]):
+    for i, name in enumerate(["m1(lgbm)", "m2(lgbm)", "m3(xgb)", "m4(cat)", "m5(huber)"]):
         mape = compute_mape(y_train, oof_preds[:, i])
         logger.info(f"  OOF {name}: MAPE={mape:.4f}, Score={1-mape:.4f}")
 
@@ -253,16 +297,21 @@ def generate_oof_predictions(
 
 def train_meta_learner(
     oof_preds: np.ndarray, y_train: np.ndarray
-) -> Ridge:
-    """Train Ridge regression meta-learner on out-of-fold predictions."""
-    logger.info("\nTraining meta-learner (Ridge) on OOF predictions...")
-    meta = Ridge(alpha=1.0, fit_intercept=True)
+) -> RidgeCV:
+    """Train RidgeCV meta-learner on out-of-fold predictions."""
+    logger.info("\nTraining meta-learner (RidgeCV) on OOF predictions...")
+    meta = RidgeCV(
+        alphas=np.logspace(-1, 1.5, 20),  # 0.1 to ~31.6, 20 points
+        fit_intercept=True,
+        cv=5,
+    )
     meta.fit(oof_preds, y_train)
 
     meta_pred = meta.predict(oof_preds)
     meta_mape = compute_mape(y_train, meta_pred)
 
     logger.info(f"  Meta-learner OOF MAPE: {meta_mape:.4f} (Score: {1-meta_mape:.4f})")
+    logger.info(f"  Meta-learner best alpha: {meta.alpha_}")
     logger.info(f"  Meta-learner weights: {meta.coef_}")
     logger.info(f"  Meta-learner intercept: {meta.intercept_:.6f}")
 
@@ -273,21 +322,23 @@ def train_final_models(
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     feature_names: list[str],
+    sample_weight: np.ndarray | None = None,
 ) -> dict:
     """Train final base models on full training set."""
     logger.info("\n=== Training final models on full training set ===")
 
     models = {}
-    models["m1"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M1, feature_names, "m1_final")
-    models["m2"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M2, feature_names, "m2_final")
-    models["m3"] = train_xgboost(X_train, y_train, X_val, y_val, PARAMS_M3, feature_names, "m3_final")
-    models["m4"] = train_catboost(X_train, y_train, X_val, y_val, PARAMS_M4, feature_names, "m4_final")
+    models["m1"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M1, feature_names, "m1_final", sample_weight=sample_weight)
+    models["m2"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M2, feature_names, "m2_final", sample_weight=sample_weight)
+    models["m3"] = train_xgboost(X_train, y_train, X_val, y_val, PARAMS_M3, feature_names, "m3_final", sample_weight=sample_weight)
+    models["m4"] = train_catboost(X_train, y_train, X_val, y_val, PARAMS_M4, feature_names, "m4_final", sample_weight=sample_weight)
+    models["m5"] = train_lgbm(X_train, y_train, X_val, y_val, PARAMS_M5, feature_names, "m5_final", sample_weight=sample_weight)
 
     return models
 
 
 def evaluate_stacking_ensemble(
-    models: dict, meta: Ridge,
+    models: dict, meta: RidgeCV,
     X: np.ndarray, y: np.ndarray, label: str,
 ) -> float:
     """
@@ -301,6 +352,7 @@ def evaluate_stacking_ensemble(
         models["m2"].predict(X),
         models["m3"].predict(X),
         models["m4"].predict(X),
+        models["m5"].predict(X),
     ])
     meta_pred = meta.predict(base_preds)
 
@@ -368,24 +420,24 @@ def train_ensemble(
     geo_dir: Path | None = None,
     output_dir: Path = DEFAULT_MODEL_DIR,
     val_fraction: float = 0.2,
-) -> tuple[dict, Ridge, list[str], GeoFeatureLookup | None]:
+) -> tuple[dict, RidgeCV, list[str], GeoFeatureLookup | None]:
     """
-    Train the full 4-model stacking ensemble.
+    Train the full 5-model stacking ensemble.
 
     Returns (models_dict, meta_learner, feature_names, geo_lookup)
     """
-    X_train, y_train, X_val, y_val, feature_names, geo_lookup = load_and_prepare_data(
+    X_train, y_train, X_val, y_val, feature_names, geo_lookup, sample_weight = load_and_prepare_data(
         dataset_path, geo_dir, val_fraction
     )
 
     # Step 1: Generate out-of-fold predictions for meta-learner training
-    oof_preds, _ = generate_oof_predictions(X_train, y_train, feature_names)
+    oof_preds, _ = generate_oof_predictions(X_train, y_train, feature_names, sample_weight=sample_weight)
 
     # Step 2: Train meta-learner on OOF predictions
     meta = train_meta_learner(oof_preds, y_train)
 
     # Step 3: Train final base models on full training set
-    models = train_final_models(X_train, y_train, X_val, y_val, feature_names)
+    models = train_final_models(X_train, y_train, X_val, y_val, feature_names, sample_weight=sample_weight)
 
     # Step 4: Evaluate
     logger.info("\n" + "=" * 60)

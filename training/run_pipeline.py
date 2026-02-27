@@ -146,7 +146,7 @@ def step_collect_data(api_key: str, num_properties: int) -> None:
 
 
 def step_feature_engineer(
-    min_price: float = 10000.0, include_search: bool = True
+    min_price: float = 75000.0, include_search: bool = True
 ) -> Path:
     """Step 6: Transform raw JSON to 79-feature Parquet."""
     logger.info("=" * 60)
@@ -174,9 +174,9 @@ def step_feature_engineer(
 
 
 def step_train(dataset_path: Path, skip_geo: bool = False) -> Path:
-    """Step 7: Train 4-model stacking ensemble (2 LightGBM + XGBoost + CatBoost + Ridge meta)."""
+    """Step 7: Train 5-model stacking ensemble (3 LightGBM + XGBoost + CatBoost + Ridge meta)."""
     logger.info("=" * 60)
-    logger.info("STEP 7: Training 4-model stacking ensemble")
+    logger.info("STEP 7: Training 5-model stacking ensemble")
     logger.info("=" * 60)
 
     from train_model import DEFAULT_GEO_DIR, DEFAULT_MODEL_DIR, train_ensemble
@@ -367,7 +367,7 @@ def main():
     parser.add_argument(
         "--min-price",
         type=float,
-        default=10000.0,
+        default=75000.0,
         help="Minimum sale price filter for training data",
     )
     # Hybrid collection budget controls
