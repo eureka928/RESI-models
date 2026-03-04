@@ -45,11 +45,15 @@ def get_hotkey_and_commitment(uid: int, network: str = "finney"):
         params=[NETUID, hotkey],
     )
 
-    if result is None or not result.value:
+    # Handle both SDK versions: result may be a dict or an object with .value
+    if result is None:
         print(f"ERROR: No commitment found for UID {uid}")
         sys.exit(1)
 
-    raw = result.value
+    raw = result.value if hasattr(result, "value") else result
+    if not raw:
+        print(f"ERROR: No commitment found for UID {uid}")
+        sys.exit(1)
     block = raw.get("block", 0)
     print(f"Commitment found at block: {block}")
 
